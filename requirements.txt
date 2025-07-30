@@ -3,4 +3,3 @@ requests
 pandas
 apscheduler
 matplotlib
-python-binance
