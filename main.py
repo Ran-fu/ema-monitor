@@ -130,6 +130,11 @@ def send_startup_message():
 @app.route('/')
 def home():
     return "✅ OKX EMA 多空監控器運作中"
+    from flask import send_from_directory
+
+@app.route('/apple-touch-icon-precomposed.png')
+def apple_icon():
+    return send_from_directory('static', 'apple-touch-icon-precomposed.png')
 
 # ========== 排程啟動 ==========
 scheduler = BackgroundScheduler()
