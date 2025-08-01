@@ -121,7 +121,7 @@ def ping():
 
 # === 啟動 Scheduler ===
 scheduler = BackgroundScheduler()
-scheduler.add_job(check_signals, 'interval', minutes=15)
+scheduler.add_job(check_signals, 'interval', minutes=30)
 scheduler.start()
 
 # 啟動時傳送一則訊息
