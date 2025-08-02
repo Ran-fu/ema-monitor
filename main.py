@@ -136,7 +136,7 @@ def ping():
 
 # === 啟動排程與伺服器 ===
 scheduler = BackgroundScheduler()
-scheduler.add_job(check_signals, 'interval', minutes='2,32')  # 每 30 分鐘執行
+scheduler.add_job(check_signals, 'interval', minutes='2,32')  # 每小時的 02 分 與 32 分執行
 scheduler.start()
 
 check_signals()  # 啟動即執行一次
