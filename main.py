@@ -127,3 +127,27 @@ scheduler.start()
 if __name__ == "__main__":
     send_telegram_message("✅ 系統已啟動（使用 Proxy 模式）")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+from flask import Flask
+import requests
+
+app = Flask(__name__)
+
+TELEGRAM_BOT_TOKEN = "8207214560:AAE6BbWOMUry65_NxiNEnfQnflp-lYPMlMI"
+TELEGRAM_CHAT_ID = "1634751416"
+
+def send_telegram_message(message: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+    try:
+        r = requests.post(url, data=payload, timeout=10)
+        if r.status_code == 200:
+            print("Telegram 測試訊息發送成功 ✅")
+        else:
+            print("Telegram 發送失敗 ❌", r.text)
+    except Exception as e:
+        print("Telegram 發送例外 ❌", e)
+
+@app.route("/test")
+def test_telegram():
+    send_telegram_message("💌 測試訊息：EMA Monitor Telegram 功能正常！")
+    return "Telegram 測試訊息已發送！"
