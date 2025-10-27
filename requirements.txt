@@ -1,0 +1,5 @@
+Flask>=2.3
+requests>=2.32
+pandas>=2.1
+apscheduler>=3.11
+gunicorn>=23
