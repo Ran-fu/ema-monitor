@@ -12,6 +12,7 @@ app = Flask(__name__)
 TELEGRAM_BOT_TOKEN = "8207214560:AAE6BbWOMUry65_NxiNEnfQnflp-lYPMlMI"
 TELEGRAM_CHAT_ID = 1634751416  # 整數型態 Chat ID
 
+# === 已發送訊號紀錄 ===
 sent_signals = {}
 
 def cleanup_old_signals(hours=6):
@@ -20,6 +21,8 @@ def cleanup_old_signals(hours=6):
     keys_to_delete = [key for key, ts in sent_signals.items() if ts < cutoff]
     for key in keys_to_delete:
         del sent_signals[key]
+    if keys_to_delete:
+        print(f"🧹 已清理 {len(keys_to_delete)} 條過期訊號")
 
 def send_telegram_message(text):
     """發送 Telegram 訊息"""
@@ -27,11 +30,10 @@ def send_telegram_message(text):
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
     try:
         response = requests.post(url, json=payload, timeout=10)
-        print("Telegram API 回傳：", response.status_code, response.text)
-        if not response.ok:
-            print(f"Telegram 發送失敗: {response.text}")
-        else:
+        if response.ok:
             print(f"Telegram 發送成功: {text}")
+        else:
+            print(f"Telegram 發送失敗: {response.text}")
     except Exception as e:
         print(f"Telegram 發送異常：{e}")
 
@@ -44,9 +46,7 @@ def get_klines(symbol, retries=3):
             response = requests.get(url, headers=headers, timeout=10)
             data = response.json().get('data', [])
             if len(data) == 0:
-                msg = f"[{symbol}] 無法取得資料"
-                print(msg)
-                send_telegram_message(msg)
+                print(f"[{symbol}] 無法取得資料")
                 return pd.DataFrame()
             df = pd.DataFrame(data, columns=['ts','open','high','low','close','vol','c1','c2','c3'])
             df[['open','high','low','close','vol']] = df[['open','high','low','close','vol']].astype(float)
@@ -57,13 +57,9 @@ def get_klines(symbol, retries=3):
             df['EMA55'] = df['close'].ewm(span=55).mean()
             return df
         except Exception as e:
-            msg = f"[{symbol}] 抓取失敗：{e}"
-            print(msg)
-            send_telegram_message(msg)
+            print(f"[{symbol}] 抓取失敗：{e}")
             time.sleep(1)
-    msg = f"[{symbol}] 多次抓取失敗，跳過"
-    print(msg)
-    send_telegram_message(msg)
+    print(f"[{symbol}] 多次抓取失敗，跳過")
     return pd.DataFrame()
 
 def is_bullish_engulfing(df):
@@ -83,7 +79,7 @@ def check_signals():
     print(f"[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] 開始檢查訊號...")
     cleanup_old_signals()
 
-    main_symbols = ["BTC","ETH","SOL","XRP"]
+    main_symbols = ["BTC", "ETH", "SOL", "XRP"]
     top3_symbols = []
 
     # 取得當日成交量前 3 名
@@ -96,11 +92,9 @@ def check_signals():
         df_vol = df_vol[df_vol['instId'].str.endswith("USDT")]
         df_vol['vol24h'] = df_vol['vol24h'].astype(float)
         df_vol = df_vol.sort_values('vol24h', ascending=False)
-        top3_symbols = df_vol['instId'].head(3).str.replace("-USDT","").tolist()
+        top3_symbols = df_vol['instId'].head(3).str.replace("-USDT", "").tolist()
     except Exception as e:
-        msg = f"取得 Top3 交易量失敗: {e}"
-        print(msg)
-        send_telegram_message(msg)
+        print(f"取得 Top3 交易量失敗: {e}")
 
     watch_symbols = list(set(main_symbols + top3_symbols))
 
@@ -109,8 +103,7 @@ def check_signals():
         try:
             df = get_klines(symbol)
             if df.empty or len(df) < 60:
-                msg = f"[{symbol}] 資料不足，跳過策略判斷"
-                print(msg)
+                print(f"[{symbol}] 資料不足，跳過策略判斷")
                 continue
 
             ema12 = df['EMA12'].iloc[-2]
@@ -127,28 +120,27 @@ def check_signals():
 
             # === 多頭訊號 ===
             if is_up and bull_key not in sent_signals:
-                cond_up = (df['EMA12'].values > df['EMA30'].values) & (df['EMA30'].values > df['EMA55'].values)
+                cond_up = (df['EMA12'] > df['EMA30']) & (df['EMA30'] > df['EMA55'])
                 up_df = df[cond_up].reset_index(drop=True)
-                if not up_df.empty and not (up_df['low'].values <= up_df['EMA55'].values).any():
+                if not up_df.empty and not (up_df['low'] <= up_df['EMA55']).any():
                     if is_bullish_engulfing(df):
-                        msg = f"🟢 {symbol}\n看漲吞沒，收盤：{close:.4f} ({candle_time})"
+                        msg = f"🟢 {symbol}\n看漲吞沒\n收盤：{close:.4f}\n時間（台灣）：{(datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')}"
                         send_telegram_message(msg)
                         sent_signals[bull_key] = datetime.utcnow()
 
             # === 空頭訊號 ===
             if is_down and bear_key not in sent_signals:
-                cond_down = (df['EMA12'].values < df['EMA30'].values) & (df['EMA30'].values < df['EMA55'].values)
+                cond_down = (df['EMA12'] < df['EMA30']) & (df['EMA30'] < df['EMA55'])
                 down_df = df[cond_down].reset_index(drop=True)
-                if not down_df.empty and not (down_df['high'].values >= down_df['EMA55'].values).any():
+                if not down_df.empty and not (down_df['high'] >= down_df['EMA55']).any():
                     if is_bearish_engulfing(df):
-                        msg = f"🔴 {symbol}\n看跌吞沒，收盤：{close:.4f} ({candle_time})"
+                        msg = f"🔴 {symbol}\n看跌吞沒\n收盤：{close:.4f}\n時間（台灣）：{(datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')}"
                         send_telegram_message(msg)
                         sent_signals[bear_key] = datetime.utcnow()
 
         except Exception as e:
-            msg = f"[{symbol}] 判斷策略錯誤：{e}"
-            print(msg)
-            send_telegram_message(msg)
+            print(f"[{symbol}] 判斷策略錯誤：{e}")
+            send_telegram_message(f"[{symbol}] 策略錯誤：{e}")
 
 # === Flask 網頁 ===
 @app.route('/')
@@ -167,15 +159,13 @@ def ping():
 
 # === 排程設定 ===
 scheduler = BackgroundScheduler()
-scheduler.add_job(check_signals, 'cron', minute='2,32')
-
-def send_startup_message():
-    send_telegram_message("🚀 OKX EMA 吞沒監控已啟動")
-
-scheduler.add_job(send_startup_message, 'date', run_date=datetime.utcnow() + timedelta(seconds=5))
+scheduler.add_job(check_signals, 'cron', minute='2,32')  # 每 30 分收盤後 2 分執行
 scheduler.start()
 
-# === 主程式 ===
+# === 啟動時立即通知 + 執行一次 ===
 if __name__ == '__main__':
+    taipei_time = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
+    send_telegram_message(f"✅ Render 伺服器已啟動\n📅 台灣時間：{taipei_time}")
+    check_signals()  # 啟動時立即跑一次
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
