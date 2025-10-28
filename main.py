@@ -18,7 +18,7 @@ today_top3 = []
 today_date = None
 STATE_FILE = "state.json"
 
-# === 載入與保存狀態 ===
+# === 狀態保存與載入 ===
 def load_state():
     global sent_signals, today_date
     if os.path.exists(STATE_FILE):
@@ -61,7 +61,7 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"❌ Telegram 發送異常：{e}")
 
-# === 取得 K 線資料（合約版） ===
+# === 取得 K 線資料（OKX SWAP 合約） ===
 def get_klines(symbol, retries=3):
     url = f'https://www.okx.com/api/v5/market/history-candles?instId={symbol}-USDT-SWAP&bar=30m&limit=200'
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -79,7 +79,7 @@ def get_klines(symbol, retries=3):
             df['EMA12'] = df['close'].ewm(span=12).mean()
             df['EMA30'] = df['close'].ewm(span=30).mean()
             df['EMA55'] = df['close'].ewm(span=55).mean()
-            time.sleep(0.5)  # 避免封鎖
+            time.sleep(0.5)
             return df
         except Exception as e:
             send_telegram_message(f"[{symbol}] 抓取失敗：{e}")
@@ -98,7 +98,7 @@ def is_bearish_engulfing(df):
     last_open, last_close = df['open'].iloc[-2], df['close'].iloc[-2]
     return (prev_close > prev_open) and (last_close < last_open) and (last_close < prev_open) and (last_open > prev_close)
 
-# === 更新當日 Top3（SWAP 合約） ===
+# === 更新每日 Top3（SWAP 合約） ===
 def update_today_top3():
     global today_top3, today_date
     now_date = datetime.utcnow().date()
@@ -165,9 +165,9 @@ def check_signals():
         except Exception as e:
             send_telegram_message(f"[{symbol}] ❌ 策略錯誤：{e}")
 
-    save_state()  # 每次檢查完保存狀態
+    save_state()
 
-# === Flask 首頁 ===
+# === Flask 首頁與 ping ===
 @app.route('/')
 def home():
     return "🚀 OKX SWAP EMA 吞沒策略伺服器運行中 ✅"
