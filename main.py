@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, send_from_directory
+from flask import Flask, render_template_string
 from apscheduler.schedulers.background import BackgroundScheduler
 import requests
 import pandas as pd
@@ -13,7 +13,7 @@ app = Flask(__name__)
 TELEGRAM_BOT_TOKEN = "8207214560:AAE6BbWOMUry65_NxiNEnfQnflp-lYPMlMI"
 TELEGRAM_CHAT_ID = "1634751416"
 
-# 已發送過的訊號記錄（包含時間）
+# 已發送過訊號 & 今日 Top3
 sent_signals = {}
 today_top3 = []
 today_date = None
@@ -64,15 +64,19 @@ def cleanup_old_signals(hours=6):
     for key in keys_to_delete:
         del sent_signals[key]
 
-# === 取得 Bitunix K 線資料 ===
+# === OKX K 線資料 ===
 def get_klines(symbol, retries=3):
-    url = f'https://api.bitunix.com/api/v1/market/candles?symbol={symbol}&period=30min&size=100'
+    url = f'https://www.okx.com/api/v5/market/history-candles?instId={symbol}-USDT-SWAP&bar=30m&limit=200'
+    headers = {"User-Agent":"Mozilla/5.0"}
     for _ in range(retries):
         try:
-            resp = requests.get(url, timeout=10)
-            data = resp.json()['data']
-            df = pd.DataFrame(data, columns=['ts','open','high','low','close','vol'])
-            df[['open','high','low','close']] = df[['open','high','low','close']].astype(float)
+            resp = requests.get(url, headers=headers, timeout=10).json()
+            data = resp.get('data', [])
+            if not data:
+                print(f"[{symbol}] 無資料")
+                return pd.DataFrame()
+            df = pd.DataFrame(data, columns=['ts','open','high','low','close','vol','c1','c2','c3'])
+            df[['open','high','low','close','vol']] = df[['open','high','low','close','vol']].astype(float)
             df['ts'] = pd.to_datetime(df['ts'], unit='ms')
             df = df.iloc[::-1].reset_index(drop=True)
             df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
@@ -82,7 +86,6 @@ def get_klines(symbol, retries=3):
         except Exception as e:
             print(f"[{symbol}] 抓取失敗: {e}")
             time.sleep(1)
-    print(f"[{symbol}] 多次抓取失敗，略過")
     return pd.DataFrame()
 
 # === 吞沒判斷 ===
@@ -103,15 +106,15 @@ def update_today_top3():
     if today_date != now_date:
         today_date = now_date
         try:
-            url = "https://api.bitunix.com/api/v1/market/tickers"
+            url = "https://www.okx.com/api/v5/market/tickers?instType=SWAP"
             resp = requests.get(url, timeout=10).json()
             tickers = resp.get('data', [])
             df_vol = pd.DataFrame(tickers)
-            df_vol = df_vol[df_vol['symbol'].str.endswith("USDT")]
+            df_vol = df_vol[df_vol['instId'].str.endswith("USDT-SWAP")]
             df_vol['vol24h'] = pd.to_numeric(df_vol['vol24h'], errors='coerce')
             df_vol = df_vol.dropna(subset=['vol24h'])
             df_vol = df_vol.sort_values('vol24h', ascending=False)
-            today_top3 = df_vol['symbol'].head(3).tolist()
+            today_top3 = df_vol['instId'].head(3).str.replace("-USDT-SWAP","").tolist()
             print(f"📊 今日 Top3: {today_top3}")
         except Exception as e:
             print(f"⚠️ 更新 Top3 失敗: {e}")
@@ -131,7 +134,7 @@ def check_signals():
     cleanup_old_signals()
     update_today_top3()
 
-    main_symbols = ["BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT"]
+    main_symbols = ["BTC","ETH","SOL","XRP"]
     watch_symbols = list(set(main_symbols + today_top3))
 
     for symbol in watch_symbols:
@@ -165,7 +168,7 @@ def check_signals():
 # === Flask 網頁 ===
 @app.route('/')
 def home():
-    return render_template_string("<h1>🚀 Bitunix EMA 吞沒策略運行中 ✅</h1>")
+    return render_template_string("<h1>🚀 OKX EMA 吞沒策略運行中 ✅</h1>")
 
 @app.route('/ping')
 def ping():
@@ -180,8 +183,9 @@ scheduler.start()
 # === 啟動訊息 ===
 load_state()
 update_today_top3()
-check_signals()
-send_telegram_message("🚀 Bitunix EMA 吞沒監控已啟動 ✅")
+top3_msg = "今日 Top3: " + ", ".join(today_top3) if today_top3 else "無 Top3"
+send_telegram_message(f"🚀 OKX EMA 吞沒監控已啟動 ✅\n{top3_msg}")
+check_signals()  # 啟動立即檢查一次
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
