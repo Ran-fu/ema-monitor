@@ -38,7 +38,6 @@ def save_state():
                 "sent_signals": {k: v.isoformat() for k, v in sent_signals.items()},
                 "today_date": str(today_date)
             }, f)
-            print("💾 狀態已保存")
     except Exception as e:
         print(f"⚠️ 保存狀態失敗：{e}")
 
@@ -51,19 +50,18 @@ def cleanup_old_signals(hours=6):
 
 # === Telegram 發送 ===
 def send_telegram_message(text):
-    print("📩 發送訊息:", text)
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
     try:
         response = requests.post(url, json=payload, timeout=10)
         if not response.ok:
-            print(f"❌ Telegram 發送失敗: {response.text}")
+            print(f"Telegram 發送失敗: {response.text}")
         else:
-            print("✅ Telegram 訊息已發送")
+            print(f"✅ 發送訊息：{text}")
     except Exception as e:
         print(f"❌ Telegram 發送異常：{e}")
 
-# === 取得 OKX 合約 K 線資料 ===
+# === 取得 K 線資料（OKX SWAP 合約） ===
 def get_klines(symbol, retries=3):
     url = f'https://www.okx.com/api/v5/market/history-candles?instId={symbol}-USDT-SWAP&bar=30m&limit=200'
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -72,7 +70,7 @@ def get_klines(symbol, retries=3):
             response = requests.get(url, headers=headers, timeout=10)
             data = response.json().get('data', [])
             if len(data) == 0:
-                print(f"[{symbol}] ❌ 無法取得資料")
+                print(f"[{symbol}] 無法取得資料")
                 return pd.DataFrame()
             df = pd.DataFrame(data, columns=['ts','open','high','low','close','vol','c1','c2','c3'])
             df[['open','high','low','close','vol']] = df[['open','high','low','close','vol']].astype(float)
@@ -81,13 +79,12 @@ def get_klines(symbol, retries=3):
             df['EMA12'] = df['close'].ewm(span=12).mean()
             df['EMA30'] = df['close'].ewm(span=30).mean()
             df['EMA55'] = df['close'].ewm(span=55).mean()
-            print(f"[{symbol}] K線資料抓取成功, 長度: {len(df)}")
             time.sleep(0.5)
             return df
         except Exception as e:
             print(f"[{symbol}] 抓取失敗：{e}")
             time.sleep(1)
-    print(f"[{symbol}] 🚫 多次抓取失敗，略過")
+    print(f"[{symbol}] 多次抓取失敗，略過")
     return pd.DataFrame()
 
 # === 吞沒判斷 ===
@@ -101,7 +98,7 @@ def is_bearish_engulfing(df):
     last_open, last_close = df['open'].iloc[-2], df['close'].iloc[-2]
     return (prev_close > prev_open) and (last_close < last_open) and (last_close < prev_open) and (last_open > prev_close)
 
-# === 更新當日 Top3 ===
+# === 更新每日 Top3 ===
 def update_today_top3():
     global today_top3, today_date
     now_date = datetime.utcnow().date()
@@ -117,14 +114,14 @@ def update_today_top3():
             df_vol['vol24h'] = pd.to_numeric(df_vol['vol24h'], errors='coerce')
             df_vol = df_vol.dropna(subset=['vol24h'])
             df_vol = df_vol.sort_values('vol24h', ascending=False)
-            today_top3 = df_vol['instId'].head(3).str.replace("-USDT-SWAP","").tolist()
+            today_top3 = df_vol['instId'].head(3).str.replace("-USDT-SWAP", "").tolist()
             print(f"📊 今日 Top3: {', '.join(today_top3)}")
         except Exception as e:
-            print(f"⚠️ 更新 Top3 失敗：{e}")
+            send_telegram_message(f"⚠️ 更新 Top3 失敗：{e}")
 
-# === 訊號檢查 ===
+# === 檢查訊號 ===
 def check_signals():
-    print(f"\n[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 開始檢查訊號...")
+    print(f"\n[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] 開始檢查訊號...")
     cleanup_old_signals()
     update_today_top3()
 
@@ -135,7 +132,6 @@ def check_signals():
         try:
             df = get_klines(symbol)
             if df.empty or len(df) < 60:
-                print(f"[{symbol}] K線不足, 跳過")
                 continue
 
             ema12 = df['EMA12'].iloc[-2]
@@ -149,10 +145,11 @@ def check_signals():
 
             bull_key = f"{symbol}-{candle_time}-bull"
             bear_key = f"{symbol}-{candle_time}-bear"
+
             is_top3 = symbol in today_top3
 
-            # debug log
-            print(f"{symbol} 收盤: {close}, EMA12:{ema12}, EMA30:{ema30}, EMA55:{ema55}, 多頭:{is_up}, 空頭:{is_down}")
+            # Debug log
+            print(f"{symbol} 收盤:{close}, EMA12:{ema12:.2f}, EMA30:{ema30:.2f}, EMA55:{ema55:.2f}, is_up:{is_up}, is_down:{is_down}")
 
             # 多頭訊號
             if is_up and bull_key not in sent_signals and is_bullish_engulfing(df):
@@ -169,7 +166,7 @@ def check_signals():
                 sent_signals[bear_key] = datetime.utcnow()
 
         except Exception as e:
-            print(f"[{symbol}] ❌ 策略錯誤：{e}")
+            send_telegram_message(f"[{symbol}] 策略錯誤：{e}")
 
     save_state()
 
@@ -185,17 +182,19 @@ def ping():
 # === 排程設定 ===
 scheduler = BackgroundScheduler(timezone='Asia/Taipei')
 scheduler.add_job(check_signals, 'cron', minute='2,32')
+scheduler.start()
 
+# === 啟動訊息與測試訊號 ===
 def send_startup_message():
     send_telegram_message("🚀 OKX SWAP EMA 吞沒監控已啟動 ✅")
-
-scheduler.add_job(send_startup_message, 'date', run_date=datetime.utcnow() + timedelta(seconds=5))
-scheduler.start()
+    # 測試訊號確認 Bot 可用
+    send_telegram_message("🟢 測試訊號：Bot 正常運作")
 
 # === 主程式 ===
 if __name__ == '__main__':
     load_state()
     port = int(os.environ.get('PORT', 10000))
     print(f"🌐 Flask server running on port {port}")
-    check_signals()  # 啟動立即檢查一次
+    send_startup_message()   # 啟動時發送訊息
+    check_signals()           # 啟動立即檢查一次
     app.run(host='0.0.0.0', port=port)
