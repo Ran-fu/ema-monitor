@@ -31,6 +31,8 @@ def load_state():
                 print("🧩 狀態已載入")
         except Exception as e:
             print(f"⚠️ 載入狀態失敗：{e}")
+            sent_signals = {}
+            today_date = datetime.utcnow().date()
 
 def save_state():
     try:
@@ -187,14 +189,8 @@ def ping():
 
 # === 排程設定 ===
 scheduler = BackgroundScheduler(timezone='Asia/Taipei')
-scheduler.add_job(check_signals, 'cron', minute='2,32')
-scheduler.add_job(daily_cleanup, 'cron', hour=0, minute=5)  # 每日清理 sent_signals
-
-def send_startup_message():
-    send_telegram_message("🚀 OKX SWAP EMA 吞沒監控已啟動 ✅")
-
-scheduler.add_job(send_startup_message, 'date', run_date=datetime.utcnow() + timedelta(seconds=5))
-scheduler.start()
+scheduler.add_job(check_signals, 'cron', minute='2,32')       # 每 30 分鐘檢查
+scheduler.add_job(daily_cleanup, 'cron', hour=0, minute=5)    # 每日清理 sent_signals
 
 # === 主程式 ===
 if __name__ == '__main__':
@@ -202,5 +198,14 @@ if __name__ == '__main__':
     update_today_top3()
     port = int(os.environ.get('PORT', 10000))
     print(f"🌐 Flask server running on port {port}")
-    check_signals()  # 啟動立即檢查一次
+
+    # 啟動立即發送 Telegram 訊息
+    send_telegram_message("🚀 OKX SWAP EMA 吞沒監控已啟動 ✅")
+
+    # 啟動立即檢查一次訊號
+    check_signals()
+
+    # 啟動排程
+    scheduler.start()
+
     app.run(host='0.0.0.0', port=port)
