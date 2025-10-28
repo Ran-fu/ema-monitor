@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import time
 import os
 import json
+import threading
 
 app = Flask(__name__)
 
@@ -61,7 +62,7 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"❌ Telegram 發送異常：{e}")
 
-# === 取得 K 線資料（OKX SWAP 合約） ===
+# === 取得 K 線資料 ===
 def get_klines(symbol, retries=3):
     url = f'https://www.okx.com/api/v5/market/history-candles?instId={symbol}-USDT-SWAP&bar=30m&limit=200'
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -148,17 +149,14 @@ def check_signals():
 
             is_top3 = symbol in today_top3
 
-            # Debug log
             print(f"{symbol} 收盤:{close}, EMA12:{ema12:.2f}, EMA30:{ema30:.2f}, EMA55:{ema55:.2f}, is_up:{is_up}, is_down:{is_down}")
 
-            # 多頭訊號
             if is_up and bull_key not in sent_signals and is_bullish_engulfing(df):
                 prefix = "📈 Top3 " if is_top3 else "🟢"
                 msg = f"{prefix}{symbol}（SWAP）\n看漲吞沒，收盤：{close:.4f} ({candle_time})"
                 send_telegram_message(msg)
                 sent_signals[bull_key] = datetime.utcnow()
 
-            # 空頭訊號
             if is_down and bear_key not in sent_signals and is_bearish_engulfing(df):
                 prefix = "📈 Top3 " if is_top3 else "🔴"
                 msg = f"{prefix}{symbol}（SWAP）\n看跌吞沒，收盤：{close:.4f} ({candle_time})"
@@ -184,17 +182,28 @@ scheduler = BackgroundScheduler(timezone='Asia/Taipei')
 scheduler.add_job(check_signals, 'cron', minute='2,32')
 scheduler.start()
 
-# === 啟動訊息與測試訊號 ===
-def send_startup_message():
+# === Render 自動 ping 自己防睡眠 ===
+def auto_ping():
+    url = os.environ.get("SELF_URL", "https://ema-monitor.onrender.com")
+    while True:
+        try:
+            requests.get(url, timeout=5)
+        except:
+            pass
+        time.sleep(300)
+
+threading.Thread(target=auto_ping, daemon=True).start()
+
+# === 啟動訊息與立即檢查 ===
+@app.before_first_request
+def startup():
     send_telegram_message("🚀 OKX SWAP EMA 吞沒監控已啟動 ✅")
-    # 測試訊號確認 Bot 可用
     send_telegram_message("🟢 測試訊號：Bot 正常運作")
+    check_signals()
 
 # === 主程式 ===
 if __name__ == '__main__':
     load_state()
     port = int(os.environ.get('PORT', 10000))
     print(f"🌐 Flask server running on port {port}")
-    send_startup_message()   # 啟動時發送訊息
-    check_signals()           # 啟動立即檢查一次
     app.run(host='0.0.0.0', port=port)
