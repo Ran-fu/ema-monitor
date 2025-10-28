@@ -26,7 +26,9 @@ def load_state():
             with open(STATE_FILE, "r") as f:
                 data = json.load(f)
                 sent_signals = {k: datetime.fromisoformat(v) for k, v in data.get("sent_signals", {}).items()}
-                today_date = datetime.fromisoformat(data.get("today_date")).date()
+                today_date_str = data.get("today_date")
+                if today_date_str:
+                    today_date = datetime.fromisoformat(today_date_str).date()
                 print("🧩 狀態已載入")
         except Exception as e:
             print(f"⚠️ 載入狀態失敗：{e}")
@@ -119,6 +121,14 @@ def update_today_top3():
         except Exception as e:
             send_telegram_message(f"⚠️ 更新 Top3 失敗：{e}")
 
+# === 每日零點清空訊號 ===
+def daily_reset():
+    global sent_signals
+    sent_signals.clear()
+    print("🧹 每日訊號已清空")
+    update_today_top3()
+    save_state()
+
 # === 檢查訊號 ===
 def check_signals():
     print(f"\n[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] 開始檢查訊號...")
@@ -181,4 +191,20 @@ def ping():
 
 # === 排程設定 ===
 scheduler = BackgroundScheduler(timezone='Asia/Taipei')
-scheduler.add_job(check_sign
+scheduler.add_job(check_signals, 'cron', minute='2,32')
+scheduler.add_job(daily_reset, 'cron', hour=0, minute=0)
+scheduler.start()
+
+# === 啟動訊息與測試訊號 ===
+def send_startup_message():
+    send_telegram_message("🚀 OKX SWAP EMA 吞沒監控已啟動 ✅")
+    send_telegram_message("🟢 測試訊號：Bot 正常運作")
+
+# === 主程式 ===
+if __name__ == '__main__':
+    load_state()
+    port = int(os.environ.get('PORT', 10000))
+    print(f"🌐 Flask server running on port {port}")
+    send_startup_message()  
+    check_signals()           
+    app.run(host='0.0.0.0', port=port)
