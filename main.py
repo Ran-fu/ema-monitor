@@ -13,13 +13,12 @@ app = Flask(__name__)
 TELEGRAM_BOT_TOKEN = "8207214560:AAE6BbWOMUry65_NxiNEnfQnflp-lYPMlMI"
 TELEGRAM_CHAT_ID = 1634751416
 
-# === 狀態變數 ===
 sent_signals = {}
 today_top3 = []
 today_date = None
 STATE_FILE = "state.json"
 
-# === 狀態保存與載入 ===
+# === 載入與保存狀態 ===
 def load_state():
     global sent_signals, today_date
     if os.path.exists(STATE_FILE):
@@ -31,8 +30,6 @@ def load_state():
                 print("🧩 狀態已載入")
         except Exception as e:
             print(f"⚠️ 載入狀態失敗：{e}")
-            sent_signals = {}
-            today_date = datetime.utcnow().date()
 
 def save_state():
     try:
@@ -51,15 +48,7 @@ def cleanup_old_signals(hours=6):
     for key in keys_to_delete:
         del sent_signals[key]
 
-# === 每日清理訊號 ===
-def daily_cleanup():
-    global sent_signals
-    sent_signals.clear()
-    save_state()
-    send_telegram_message("🗑️ 每日訊號已清理完成，sent_signals 已重置 ✅")
-    print("🗑️ 每日訊號已清理完成")
-
-# === Telegram 發送訊息 ===
+# === Telegram 發送 ===
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
@@ -72,7 +61,7 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"❌ Telegram 發送異常：{e}")
 
-# === 取得 OKX SWAP K 線資料 ===
+# === 取得 K 線資料（合約版） ===
 def get_klines(symbol, retries=3):
     url = f'https://www.okx.com/api/v5/market/history-candles?instId={symbol}-USDT-SWAP&bar=30m&limit=200'
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -90,7 +79,7 @@ def get_klines(symbol, retries=3):
             df['EMA12'] = df['close'].ewm(span=12).mean()
             df['EMA30'] = df['close'].ewm(span=30).mean()
             df['EMA55'] = df['close'].ewm(span=55).mean()
-            time.sleep(0.5)
+            time.sleep(0.5)  # 避免封鎖
             return df
         except Exception as e:
             send_telegram_message(f"[{symbol}] 抓取失敗：{e}")
@@ -98,7 +87,7 @@ def get_klines(symbol, retries=3):
     send_telegram_message(f"[{symbol}] 🚫 多次抓取失敗，略過")
     return pd.DataFrame()
 
-# === 吞沒形態判斷 ===
+# === 吞沒判斷 ===
 def is_bullish_engulfing(df):
     prev_open, prev_close = df['open'].iloc[-3], df['close'].iloc[-3]
     last_open, last_close = df['open'].iloc[-2], df['close'].iloc[-2]
@@ -109,7 +98,7 @@ def is_bearish_engulfing(df):
     last_open, last_close = df['open'].iloc[-2], df['close'].iloc[-2]
     return (prev_close > prev_open) and (last_close < last_open) and (last_close < prev_open) and (last_open > prev_close)
 
-# === 更新每日成交量 Top3 ===
+# === 更新當日 Top3（SWAP 合約） ===
 def update_today_top3():
     global today_top3, today_date
     now_date = datetime.utcnow().date()
@@ -130,7 +119,7 @@ def update_today_top3():
         except Exception as e:
             send_telegram_message(f"⚠️ 更新 Top3 失敗：{e}")
 
-# === 訊號檢查邏輯 ===
+# === 檢查訊號 ===
 def check_signals():
     print(f"\n[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] 🚀 開始檢查訊號...")
     cleanup_old_signals()
@@ -176,9 +165,9 @@ def check_signals():
         except Exception as e:
             send_telegram_message(f"[{symbol}] ❌ 策略錯誤：{e}")
 
-    save_state()
+    save_state()  # 每次檢查完保存狀態
 
-# === Flask 路由 ===
+# === Flask 首頁 ===
 @app.route('/')
 def home():
     return "🚀 OKX SWAP EMA 吞沒策略伺服器運行中 ✅"
@@ -189,23 +178,18 @@ def ping():
 
 # === 排程設定 ===
 scheduler = BackgroundScheduler(timezone='Asia/Taipei')
-scheduler.add_job(check_signals, 'cron', minute='2,32')       # 每 30 分鐘檢查
-scheduler.add_job(daily_cleanup, 'cron', hour=0, minute=5)    # 每日清理 sent_signals
+scheduler.add_job(check_signals, 'cron', minute='2,32')
+
+def send_startup_message():
+    send_telegram_message("🚀 OKX SWAP EMA 吞沒監控已啟動 ✅")
+
+scheduler.add_job(send_startup_message, 'date', run_date=datetime.utcnow() + timedelta(seconds=5))
+scheduler.start()
 
 # === 主程式 ===
 if __name__ == '__main__':
     load_state()
-    update_today_top3()
     port = int(os.environ.get('PORT', 10000))
     print(f"🌐 Flask server running on port {port}")
-
-    # 啟動立即發送 Telegram 訊息
-    send_telegram_message("🚀 OKX SWAP EMA 吞沒監控已啟動 ✅")
-
-    # 啟動立即檢查一次訊號
-    check_signals()
-
-    # 啟動排程
-    scheduler.start()
-
+    check_signals()  # 啟動立即檢查一次
     app.run(host='0.0.0.0', port=port)
