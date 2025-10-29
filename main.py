@@ -17,6 +17,7 @@ TELEGRAM_CHAT_ID = "1634751416"
 sent_signals = {}
 today_top3 = []
 today_date = None
+last_check_time = None
 STATE_FILE = "state.json"
 
 # === 狀態管理 ===
@@ -116,8 +117,9 @@ def daily_reset():
     save_state()
     send_telegram_message("🧹 今日訊號已清空，Top3 已更新")
 
-# === 主邏輯：檢查吞沒訊號（僅吞沒 + 回踩 EMA30 未碰 EMA55） ===
+# === 主邏輯：檢查吞沒訊號（吞沒 + 回踩 EMA30 未碰 EMA55） ===
 def check_signals():
+    global last_check_time
     print(f"\n[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] 開始檢查訊號...")
     cleanup_old_signals()
     update_today_top3()
@@ -161,12 +163,30 @@ def check_signals():
             send_telegram_message(msg)
             sent_signals[bear_key] = datetime.utcnow()
 
+    last_check_time = datetime.utcnow()
     save_state()
+
+# === 掉線偵測 ===
+def check_health():
+    global last_check_time
+    now = datetime.utcnow()
+    if last_check_time is None:
+        last_check_time = now
+        return
+    diff = (now - last_check_time).total_seconds() / 60
+    if diff > 60:
+        send_telegram_message(f"⚠️ 系統可能掉線或延遲運行\n最後檢查時間：{last_check_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        last_check_time = now
 
 # === Flask 頁面 ===
 @app.route('/')
 def home():
-    return render_template_string("<h1>🚀 OKX EMA 吞沒策略（碰 EMA30 未碰 EMA55）運行中 ✅</h1>")
+    top3_text = ", ".join(today_top3) if today_top3 else "尚未更新"
+    return render_template_string(f"""
+        <h1>🚀 OKX EMA 吞沒策略（碰 EMA30 未碰 EMA55）運行中 ✅</h1>
+        <p>📊 今日 Top3：{top3_text}</p>
+        <p>🕒 上次檢查時間：{last_check_time}</p>
+    """)
 
 # === Uptime Robot ping ===
 @app.route('/ping')
@@ -177,6 +197,7 @@ def ping():
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_signals, 'cron', minute='2,32')
 scheduler.add_job(daily_reset, 'cron', hour=0, minute=0)
+scheduler.add_job(check_health, 'interval', minutes=10)
 scheduler.start()
 
 # === 啟動立即檢查 ===
