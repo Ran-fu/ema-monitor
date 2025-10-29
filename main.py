@@ -87,31 +87,6 @@ def get_klines(symbol, retries=3):
             time.sleep(1)
     return pd.DataFrame()
 
-# === 十字線吞沒判斷 ===
-def is_bullish_engulfing(prev_open, prev_close, open, close, prev_high, prev_low):
-    body_prev = abs(prev_close - prev_open)
-    body_curr = abs(close - open)
-    range_prev = abs(prev_high - prev_low)
-    is_doji = body_prev <= range_prev * 0.2  # 十字線條件
-    return (
-        (prev_close < prev_open or is_doji)
-        and close > open
-        and close > prev_open
-        and open < prev_close
-    )
-
-def is_bearish_engulfing(prev_open, prev_close, open, close, prev_high, prev_low):
-    body_prev = abs(prev_close - prev_open)
-    body_curr = abs(close - open)
-    range_prev = abs(prev_high - prev_low)
-    is_doji = body_prev <= range_prev * 0.2
-    return (
-        (prev_close > prev_open or is_doji)
-        and close < open
-        and close < prev_open
-        and open > prev_close
-    )
-
 # === 更新今日成交量 Top3 ===
 def update_today_top3():
     global today_top3, today_date
@@ -141,7 +116,7 @@ def daily_reset():
     save_state()
     send_telegram_message("🧹 今日訊號已清空，Top3 已更新")
 
-# === 主邏輯：檢查吞沒訊號 ===
+# === 主邏輯：檢查吞沒訊號（僅吞沒 + 回踩 EMA30 未碰 EMA55） ===
 def check_signals():
     print(f"\n[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] 開始檢查訊號...")
     cleanup_old_signals()
@@ -155,7 +130,6 @@ def check_signals():
         if df.empty or len(df) < 60:
             continue
 
-        # 取倒數第二根（已收盤的完整 K 線）
         prev_open, prev_close, prev_high, prev_low = df['open'].iloc[-3], df['close'].iloc[-3], df['high'].iloc[-3], df['low'].iloc[-3]
         open_, close_, high_, low_ = df['open'].iloc[-2], df['close'].iloc[-2], df['high'].iloc[-2], df['low'].iloc[-2]
         ema12, ema30, ema55 = df['EMA12'].iloc[-2], df['EMA30'].iloc[-2], df['EMA55'].iloc[-2]
@@ -165,17 +139,25 @@ def check_signals():
         bear_key = f"{symbol}-{candle_time}-bear"
         is_top3 = symbol in today_top3
 
-        # === 看漲吞沒 ===
-        if ema12 > ema30 > ema55 and is_bullish_engulfing(prev_open, prev_close, open_, close_, prev_high, prev_low) and bull_key not in sent_signals:
+        # 看漲吞沒
+        if ema12 > ema30 > ema55 \
+           and low_ <= ema30 < high_ \
+           and low_ > ema55 \
+           and prev_close < prev_open and close_ > open_ and close_ > prev_open and open_ < prev_close \
+           and bull_key not in sent_signals:
             prefix = "📈 Top3 " if is_top3 else "🟢"
-            msg = f"{prefix}{symbol}\n看漲吞沒（含十字線判斷）\n收盤: {close_} ({candle_time})"
+            msg = f"{prefix}{symbol}\n看漲吞沒（碰 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
             send_telegram_message(msg)
             sent_signals[bull_key] = datetime.utcnow()
 
-        # === 看跌吞沒 ===
-        if ema12 < ema30 < ema55 and is_bearish_engulfing(prev_open, prev_close, open_, close_, prev_high, prev_low) and bear_key not in sent_signals:
+        # 看跌吞沒
+        if ema12 < ema30 < ema55 \
+           and high_ >= ema30 > low_ \
+           and high_ < ema55 \
+           and prev_close > prev_open and close_ < open_ and close_ < prev_open and open_ > prev_close \
+           and bear_key not in sent_signals:
             prefix = "📈 Top3 " if is_top3 else "🔴"
-            msg = f"{prefix}{symbol}\n看跌吞沒（含十字線判斷）\n收盤: {close_} ({candle_time})"
+            msg = f"{prefix}{symbol}\n看跌吞沒（碰 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
             send_telegram_message(msg)
             sent_signals[bear_key] = datetime.utcnow()
 
@@ -184,19 +166,20 @@ def check_signals():
 # === Flask 頁面 ===
 @app.route('/')
 def home():
-    return render_template_string("<h1>🚀 OKX EMA 吞沒策略（含十字線判斷）運行中 ✅</h1>")
+    return render_template_string("<h1>🚀 OKX EMA 吞沒策略（碰 EMA30 未碰 EMA55）運行中 ✅</h1>")
 
+# === Uptime Robot ping ===
 @app.route('/ping')
 def ping():
-    return 'pong'
+    return 'pong', 200
 
 # === 排程設定 ===
 scheduler = BackgroundScheduler()
-scheduler.add_job(check_signals, 'cron', minute='2,32')  # 每半小時檢查一次（收盤後 2 分）
+scheduler.add_job(check_signals, 'cron', minute='2,32')
 scheduler.add_job(daily_reset, 'cron', hour=0, minute=0)
 scheduler.start()
 
-# === 啟動 ===
+# === 啟動立即檢查 ===
 load_state()
 update_today_top3()
 msg = "🚀 OKX EMA 吞沒監控已啟動 ✅\n" + ("今日 Top3: " + ", ".join(today_top3) if today_top3 else "無 Top3")
