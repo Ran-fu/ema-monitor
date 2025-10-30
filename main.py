@@ -3,9 +3,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
-import time
-import os
-import json
+from zoneinfo import ZoneInfo
+import time, os, json
 
 app = Flask(__name__)
 
@@ -65,8 +64,8 @@ def cleanup_old_signals(hours=6):
     for k in keys_to_delete:
         del sent_signals[k]
 
-# === 取得 OKX K 線資料 ===
-def get_klines(symbol, bar='30m', retries=3):
+# === 取得 K 線資料 ===
+def get_klines(symbol, bar="30m", retries=3):
     url = f'https://www.okx.com/api/v5/market/history-candles?instId={symbol}-USDT-SWAP&bar={bar}&limit=200'
     headers = {"User-Agent": "Mozilla/5.0"}
     for _ in range(retries):
@@ -78,7 +77,7 @@ def get_klines(symbol, bar='30m', retries=3):
                 return pd.DataFrame()
             df = pd.DataFrame(data, columns=['ts','open','high','low','close','vol','c1','c2','c3'])
             df[['open','high','low','close','vol']] = df[['open','high','low','close','vol']].astype(float)
-            df['ts'] = pd.to_datetime(df['ts'], unit='ms')
+            df['ts'] = pd.to_datetime(df['ts'], unit='ms').dt.tz_localize('UTC').dt.tz_convert('Asia/Taipei')
             df = df.iloc[::-1].reset_index(drop=True)
             df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
             df['EMA30'] = df['close'].ewm(span=30, adjust=False).mean()
@@ -92,7 +91,7 @@ def get_klines(symbol, bar='30m', retries=3):
 # === 更新今日成交量 Top3 ===
 def update_today_top3():
     global today_top3, today_date
-    now_date = datetime.utcnow().date()
+    now_date = datetime.now(ZoneInfo("Asia/Taipei")).date()
     if today_date != now_date:
         today_date = now_date
         try:
@@ -118,51 +117,47 @@ def daily_reset():
     save_state()
     send_telegram_message("🧹 今日訊號已清空，Top3 已更新")
 
-# === 檢查吞沒訊號（可指定 K 線週期 bar） ===
-def check_signals(bar='30m'):
+# === 檢查吞沒訊號（15m / 30m） ===
+def check_signals():
     global last_check_time
-    print(f"\n[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] 開始檢查 {bar} 訊號...")
     cleanup_old_signals()
     update_today_top3()
 
     main_symbols = ["BTC","ETH","SOL","XRP"]
     watch_symbols = list(set(main_symbols + today_top3))
 
-    for symbol in watch_symbols:
-        df = get_klines(symbol, bar=bar)
-        if df.empty or len(df) < 60:
-            continue
+    for bar in ["15m", "30m"]:
+        for symbol in watch_symbols:
+            df = get_klines(symbol, bar=bar)
+            if df.empty or len(df) < 60:
+                continue
 
-        prev_open, prev_close, prev_high, prev_low = df['open'].iloc[-3], df['close'].iloc[-3], df['high'].iloc[-3], df['low'].iloc[-3]
-        open_, close_, high_, low_ = df['open'].iloc[-2], df['close'].iloc[-2], df['high'].iloc[-2], df['low'].iloc[-2]
-        ema12, ema30, ema55 = df['EMA12'].iloc[-2], df['EMA30'].iloc[-2], df['EMA55'].iloc[-2]
+            prev_open, prev_close = df['open'].iloc[-3], df['close'].iloc[-3]
+            open_, close_, high_, low_ = df['open'].iloc[-2], df['close'].iloc[-2], df['high'].iloc[-2], df['low'].iloc[-2]
+            ema12, ema30, ema55 = df['EMA12'].iloc[-2], df['EMA30'].iloc[-2], df['EMA55'].iloc[-2]
 
-        candle_time = (df['ts'].iloc[-2] + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
-        bull_key = f"{symbol}-{candle_time}-{bar}-bull"
-        bear_key = f"{symbol}-{candle_time}-{bar}-bear"
-        is_top3 = symbol in today_top3
+            candle_time = df['ts'].iloc[-2].strftime('%Y-%m-%d %H:%M')
+            bull_key = f"{symbol}-{bar}-{candle_time}-bull"
+            bear_key = f"{symbol}-{bar}-{candle_time}-bear"
+            is_top3 = symbol in today_top3
 
-        # 看漲吞沒
-        if ema12 > ema30 > ema55 \
-           and low_ <= ema30 < high_ \
-           and low_ > ema55 \
-           and prev_close < prev_open and close_ > open_ and close_ > prev_open and open_ < prev_close \
-           and bull_key not in sent_signals:
-            prefix = "🔥 Top3 " if is_top3 else "🟢"
-            msg = f"{prefix}{symbol} ({bar})\n看漲吞沒（碰 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
-            send_telegram_message(msg)
-            sent_signals[bull_key] = datetime.utcnow()
+            # 看漲吞沒
+            if ema12 > ema30 > ema55 and low_ <= ema30 < high_ and low_ > ema55 \
+               and prev_close < prev_open and close_ > open_ and close_ > prev_open and open_ < prev_close \
+               and bull_key not in sent_signals:
+                prefix = "🔥 Top3 " if is_top3 else "🟢"
+                msg = f"{prefix}{symbol} [{bar}]\n看漲吞沒（碰 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
+                send_telegram_message(msg)
+                sent_signals[bull_key] = datetime.utcnow()
 
-        # 看跌吞沒
-        if ema12 < ema30 < ema55 \
-           and high_ >= ema30 > low_ \
-           and high_ < ema55 \
-           and prev_close > prev_open and close_ < open_ and close_ < prev_open and open_ > prev_close \
-           and bear_key not in sent_signals:
-            prefix = "🔥 Top3 " if is_top3 else "🔴"
-            msg = f"{prefix}{symbol} ({bar})\n看跌吞沒（碰 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
-            send_telegram_message(msg)
-            sent_signals[bear_key] = datetime.utcnow()
+            # 看跌吞沒
+            if ema12 < ema30 < ema55 and high_ >= ema30 > low_ and high_ < ema55 \
+               and prev_close > prev_open and close_ < open_ and close_ < prev_open and open_ > prev_close \
+               and bear_key not in sent_signals:
+                prefix = "🔥 Top3 " if is_top3 else "🔴"
+                msg = f"{prefix}{symbol} [{bar}]\n看跌吞沒（碰 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
+                send_telegram_message(msg)
+                sent_signals[bear_key] = datetime.utcnow()
 
     last_check_time = datetime.utcnow()
     save_state()
@@ -179,17 +174,16 @@ def check_health():
         send_telegram_message(f"⚠️ 系統可能掉線或延遲運行\n最後檢查時間：{last_check_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         last_check_time = now
 
-# === 時區監測（正確顯示，不再出現 480 分鐘） ===
+# === 時區監測（台灣時間） ===
 def check_timezone():
     global last_timezone_check
-    now_utc = datetime.utcnow()
-    local_time = datetime.now()
-    taiwan_time = now_utc + timedelta(hours=8)
-    diff = abs((taiwan_time - local_time).total_seconds()) / 60
+    taiwan_now = datetime.now(ZoneInfo("Asia/Taipei"))
+    utc_now = datetime.utcnow()
+    diff = abs((taiwan_now - (utc_now + timedelta(hours=8))).total_seconds()) / 60
     if diff > 5:
-        send_telegram_message(f"⚠️ 時區異常偵測：UTC+8 與本地時間偏差 {diff:.1f} 分鐘")
-    last_timezone_check = now_utc
-    print(f"🕓 時區檢查完成：本地時間 {local_time.strftime('%Y-%m-%d %H:%M:%S')} | UTC+8 {taiwan_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        send_telegram_message(f"⚠️ 時區異常偵測：與台灣時間偏差 {diff:.1f} 分鐘")
+    last_timezone_check = taiwan_now
+    print(f"🕓 時區檢查完成：{taiwan_now.strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)")
 
 # === Flask 頁面 ===
 @app.route('/')
@@ -209,25 +203,18 @@ def ping():
 
 # === 排程設定 ===
 scheduler = BackgroundScheduler()
-# 30 分鐘 K 線檢查
-scheduler.add_job(lambda: check_signals('30m'), 'cron', minute='2,32')
-# 15 分鐘 K 線檢查
-scheduler.add_job(lambda: check_signals('15m'), 'interval', minutes=15)
-# 掉線檢查
+scheduler.add_job(check_signals, 'cron', minute='2,32')   # 30m 檢查
+scheduler.add_job(check_signals, 'interval', minutes=15)  # 15m 檢查
 scheduler.add_job(check_health, 'interval', minutes=10)
-# 時區檢查
 scheduler.add_job(check_timezone, 'interval', minutes=15)
-# 每日訊號清空
 scheduler.add_job(daily_reset, 'cron', hour=0, minute=0)
 scheduler.start()
 
 # === 啟動立即執行 ===
 load_state()
 update_today_top3()
-msg = "🚀 OKX EMA 吞沒監控已啟動 ✅\n" + ("今日 Top3: " + ", ".join(today_top3) if today_top3 else "無 Top3")
-send_telegram_message(msg)
-check_signals('30m')
-check_signals('15m')
+send_telegram_message("🚀 OKX EMA 吞沒監控已啟動 ✅\n" + ("今日 Top3: " + ", ".join(today_top3) if today_top3 else "無 Top3"))
+check_signals()
 check_timezone()
 
 if __name__ == '__main__':
