@@ -179,16 +179,21 @@ def check_health():
         send_telegram_message(f"⚠️ 系統可能掉線或延遲運行\n最後檢查時間：{last_check_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         last_check_time = now
 
-# === 時區監測 ===
+# === 時區監測（改良版）===
 def check_timezone():
     global last_timezone_check
     now_utc = datetime.utcnow()
-    taiwan_time = now_utc + timedelta(hours=8)
-    diff = abs((taiwan_time - datetime.now()).total_seconds()) / 60
-    if diff > 5:
-        send_telegram_message(f"⚠️ 時區異常偵測：本地時間與 UTC+8 偏差 {diff:.1f} 分鐘")
+    system_time = datetime.now()
+
+    diff_hours = (system_time - now_utc).total_seconds() / 3600
+
+    # 容忍 ±0.5 小時誤差，允許 UTC 或 UTC+8
+    if abs(diff_hours) < 0.5 or abs(diff_hours - 8) < 0.5:
+        print(f"🕓 時區正常：系統偏差 {diff_hours:.2f} 小時")
+    else:
+        send_telegram_message(f"⚠️ 時區異常：目前偏差 {diff_hours:.2f} 小時（應為 +8 或 0）")
+
     last_timezone_check = now_utc
-    print(f"🕓 時區檢查完成：{taiwan_time.strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)")
 
 # === Flask 頁面 ===
 @app.route('/')
