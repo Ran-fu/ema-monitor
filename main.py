@@ -66,8 +66,8 @@ def cleanup_old_signals(hours=6):
         del sent_signals[k]
 
 # === 取得 OKX K 線資料 ===
-def get_klines(symbol, retries=3):
-    url = f'https://www.okx.com/api/v5/market/history-candles?instId={symbol}-USDT-SWAP&bar=30m&limit=200'
+def get_klines(symbol, interval="30m", retries=3):
+    url = f'https://www.okx.com/api/v5/market/history-candles?instId={symbol}-USDT-SWAP&bar={interval}&limit=200'
     headers = {"User-Agent": "Mozilla/5.0"}
     for _ in range(retries):
         try:
@@ -118,10 +118,10 @@ def daily_reset():
     save_state()
     send_telegram_message("🧹 今日訊號已清空，Top3 已更新")
 
-# === 主邏輯：檢查吞沒訊號 ===
-def check_signals():
+# === 吞沒檢測主邏輯 ===
+def check_engulfing(interval="30m"):
     global last_check_time
-    print(f"\n[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] 開始檢查訊號...")
+    print(f"\n[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] 開始 {interval} 訊號檢查...")
     cleanup_old_signals()
     update_today_top3()
 
@@ -129,7 +129,7 @@ def check_signals():
     watch_symbols = list(set(main_symbols + today_top3))
 
     for symbol in watch_symbols:
-        df = get_klines(symbol)
+        df = get_klines(symbol, interval=interval)
         if df.empty or len(df) < 60:
             continue
 
@@ -138,8 +138,8 @@ def check_signals():
         ema12, ema30, ema55 = df['EMA12'].iloc[-2], df['EMA30'].iloc[-2], df['EMA55'].iloc[-2]
 
         candle_time = (df['ts'].iloc[-2] + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
-        bull_key = f"{symbol}-{candle_time}-bull"
-        bear_key = f"{symbol}-{candle_time}-bear"
+        bull_key = f"{symbol}-{candle_time}-bull-{interval}"
+        bear_key = f"{symbol}-{candle_time}-bear-{interval}"
         is_top3 = symbol in today_top3
 
         # 看漲吞沒
@@ -149,7 +149,7 @@ def check_signals():
            and prev_close < prev_open and close_ > open_ and close_ > prev_open and open_ < prev_close \
            and bull_key not in sent_signals:
             prefix = "🔥 Top3 " if is_top3 else "🟢"
-            msg = f"{prefix}{symbol}\n看漲吞沒（碰 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
+            msg = f"[{interval}]{prefix}{symbol}\n看漲吞沒（碰 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
             send_telegram_message(msg)
             sent_signals[bull_key] = datetime.utcnow()
 
@@ -160,7 +160,7 @@ def check_signals():
            and prev_close > prev_open and close_ < open_ and close_ < prev_open and open_ > prev_close \
            and bear_key not in sent_signals:
             prefix = "🔥 Top3 " if is_top3 else "🔴"
-            msg = f"{prefix}{symbol}\n看跌吞沒（碰 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
+            msg = f"[{interval}]{prefix}{symbol}\n看跌吞沒（碰 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
             send_telegram_message(msg)
             sent_signals[bear_key] = datetime.utcnow()
 
@@ -179,21 +179,16 @@ def check_health():
         send_telegram_message(f"⚠️ 系統可能掉線或延遲運行\n最後檢查時間：{last_check_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         last_check_time = now
 
-# === 時區監測（改良版）===
+# === 時區監測 ===
 def check_timezone():
     global last_timezone_check
     now_utc = datetime.utcnow()
-    system_time = datetime.now()
-
-    diff_hours = (system_time - now_utc).total_seconds() / 3600
-
-    # 容忍 ±0.5 小時誤差，允許 UTC 或 UTC+8
-    if abs(diff_hours) < 0.5 or abs(diff_hours - 8) < 0.5:
-        print(f"🕓 時區正常：系統偏差 {diff_hours:.2f} 小時")
-    else:
-        send_telegram_message(f"⚠️ 時區異常：目前偏差 {diff_hours:.2f} 小時（應為 +8 或 0）")
-
+    taiwan_time = now_utc + timedelta(hours=8)
+    diff = abs((taiwan_time - datetime.now()).total_seconds()) / 60
+    if diff > 5:
+        send_telegram_message(f"⚠️ 時區異常偵測：本地時間與 UTC+8 偏差 {diff:.1f} 分鐘")
     last_timezone_check = now_utc
+    print(f"🕓 時區檢查完成：{taiwan_time.strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)")
 
 # === Flask 頁面 ===
 @app.route('/')
@@ -206,15 +201,14 @@ def home():
         <p>🌏 最近時區檢查：{last_timezone_check}</p>
     """)
 
-# === Uptime Robot ping ===
 @app.route('/ping')
 def ping():
     return 'pong', 200
 
 # === 排程設定 ===
 scheduler = BackgroundScheduler()
-scheduler.add_job(check_signals, 'cron', minute='2,32')   # 原30分檢查
-scheduler.add_job(check_signals, 'interval', minutes=15)  # 新增15分監測
+scheduler.add_job(lambda: check_engulfing("30m"), 'cron', minute='2,32')   # 30m K 線
+scheduler.add_job(lambda: check_engulfing("15m"), 'interval', minutes=15)  # 15m K 線
 scheduler.add_job(check_health, 'interval', minutes=10)
 scheduler.add_job(check_timezone, 'interval', minutes=15)
 scheduler.add_job(daily_reset, 'cron', hour=0, minute=0)
@@ -225,7 +219,8 @@ load_state()
 update_today_top3()
 msg = "🚀 OKX EMA 吞沒監控已啟動 ✅\n" + ("今日 Top3: " + ", ".join(today_top3) if today_top3 else "無 Top3")
 send_telegram_message(msg)
-check_signals()
+check_engulfing("30m")
+check_engulfing("15m")
 check_timezone()
 
 if __name__ == '__main__':
