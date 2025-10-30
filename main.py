@@ -18,6 +18,7 @@ sent_signals = {}
 today_top3 = []
 today_date = None
 last_check_time = None
+last_timezone_check = None
 STATE_FILE = "state.json"
 
 # === 狀態管理 ===
@@ -117,7 +118,7 @@ def daily_reset():
     save_state()
     send_telegram_message("🧹 今日訊號已清空，Top3 已更新")
 
-# === 主邏輯：檢查吞沒訊號（吞沒 + 回踩 EMA30 未碰 EMA55） ===
+# === 主邏輯：檢查吞沒訊號 ===
 def check_signals():
     global last_check_time
     print(f"\n[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] 開始檢查訊號...")
@@ -147,7 +148,7 @@ def check_signals():
            and low_ > ema55 \
            and prev_close < prev_open and close_ > open_ and close_ > prev_open and open_ < prev_close \
            and bull_key not in sent_signals:
-            prefix = "📈 Top3 " if is_top3 else "🟢"
+            prefix = "🔥 Top3 " if is_top3 else "🟢"
             msg = f"{prefix}{symbol}\n看漲吞沒（碰 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
             send_telegram_message(msg)
             sent_signals[bull_key] = datetime.utcnow()
@@ -158,7 +159,7 @@ def check_signals():
            and high_ < ema55 \
            and prev_close > prev_open and close_ < open_ and close_ < prev_open and open_ > prev_close \
            and bear_key not in sent_signals:
-            prefix = "📈 Top3 " if is_top3 else "🔴"
+            prefix = "🔥 Top3 " if is_top3 else "🔴"
             msg = f"{prefix}{symbol}\n看跌吞沒（碰 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
             send_telegram_message(msg)
             sent_signals[bear_key] = datetime.utcnow()
@@ -178,6 +179,17 @@ def check_health():
         send_telegram_message(f"⚠️ 系統可能掉線或延遲運行\n最後檢查時間：{last_check_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         last_check_time = now
 
+# === 時區監測 ===
+def check_timezone():
+    global last_timezone_check
+    now_utc = datetime.utcnow()
+    taiwan_time = now_utc + timedelta(hours=8)
+    diff = abs((taiwan_time - datetime.now()).total_seconds()) / 60
+    if diff > 5:
+        send_telegram_message(f"⚠️ 時區異常偵測：本地時間與 UTC+8 偏差 {diff:.1f} 分鐘")
+    last_timezone_check = now_utc
+    print(f"🕓 時區檢查完成：{taiwan_time.strftime('%Y-%m-%d %H:%M:%S')} (UTC+8)")
+
 # === Flask 頁面 ===
 @app.route('/')
 def home():
@@ -186,6 +198,7 @@ def home():
         <h1>🚀 OKX EMA 吞沒策略（碰 EMA30 未碰 EMA55）運行中 ✅</h1>
         <p>📊 今日 Top3：{top3_text}</p>
         <p>🕒 上次檢查時間：{last_check_time}</p>
+        <p>🌏 最近時區檢查：{last_timezone_check}</p>
     """)
 
 # === Uptime Robot ping ===
@@ -195,17 +208,20 @@ def ping():
 
 # === 排程設定 ===
 scheduler = BackgroundScheduler()
-scheduler.add_job(check_signals, 'cron', minute='2,32')
-scheduler.add_job(daily_reset, 'cron', hour=0, minute=0)
+scheduler.add_job(check_signals, 'cron', minute='2,32')   # 原30分檢查
+scheduler.add_job(check_signals, 'interval', minutes=15)  # 新增15分監測
 scheduler.add_job(check_health, 'interval', minutes=10)
+scheduler.add_job(check_timezone, 'interval', minutes=15)
+scheduler.add_job(daily_reset, 'cron', hour=0, minute=0)
 scheduler.start()
 
-# === 啟動立即檢查 ===
+# === 啟動立即執行 ===
 load_state()
 update_today_top3()
 msg = "🚀 OKX EMA 吞沒監控已啟動 ✅\n" + ("今日 Top3: " + ", ".join(today_top3) if today_top3 else "無 Top3")
 send_telegram_message(msg)
 check_signals()
+check_timezone()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
