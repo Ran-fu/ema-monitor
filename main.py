@@ -108,14 +108,17 @@ def update_today_top3():
         except Exception as e:
             print(f"⚠️ 更新 Top3 失敗: {e}")
 
-# === 每日清空訊號 ===
+# === 每日清空訊號（修改版） ===
 def daily_reset():
     global sent_signals
     sent_signals.clear()
     print("🧹 每日訊號已清空")
     update_today_top3()
     save_state()
-    send_telegram_message("🧹 今日訊號已清空，Top3 已更新")
+
+    # ✅ 發送包含今日 Top3 的通知
+    top3_text = ", ".join(today_top3) if today_top3 else "無資料"
+    send_telegram_message(f"🧹 今日訊號已清空\n📊 今日 Top3：{top3_text}")
 
 # === 檢查吞沒訊號（15m / 30m） ===
 def check_signals():
@@ -142,8 +145,8 @@ def check_signals():
 
             # === 看漲吞沒（碰 EMA30 或收線於 EMA30 下方，但未碰 EMA55） ===
             if ema12 > ema30 > ema55 and (
-                (low_ <= ema30 < high_ and low_ > ema55) or  # 原條件：碰 EMA30 未碰 EMA55
-                (low_ <= ema30 and close_ < ema30 and low_ > ema55)  # 新增條件：收線於 EMA30 下方但未碰 EMA55
+                (low_ <= ema30 < high_ and low_ > ema55) or
+                (low_ <= ema30 and close_ < ema30 and low_ > ema55)
             ) and prev_close < prev_open and close_ > open_ and close_ > prev_open and open_ < prev_close \
               and bull_key not in sent_signals:
                 prefix = "🔥 Top3 " if is_top3 else "🟢"
@@ -153,8 +156,8 @@ def check_signals():
 
             # === 看跌吞沒（碰 EMA30 或收線於 EMA30 上方，但未碰 EMA55） ===
             if ema12 < ema30 < ema55 and (
-                (high_ >= ema30 > low_ and high_ < ema55) or  # 原條件：碰 EMA30 未碰 EMA55
-                (high_ >= ema30 and close_ > ema30 and high_ < ema55)  # 新增條件：收線於 EMA30 上方但未碰 EMA55
+                (high_ >= ema30 > low_ and high_ < ema55) or
+                (high_ >= ema30 and close_ > ema30 and high_ < ema55)
             ) and prev_close > prev_open and close_ < open_ and close_ < prev_open and open_ > prev_close \
               and bear_key not in sent_signals:
                 prefix = "🔥 Top3 " if is_top3 else "🔴"
