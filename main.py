@@ -108,19 +108,16 @@ def update_today_top3():
         except Exception as e:
             print(f"⚠️ 更新 Top3 失敗: {e}")
 
-# === 每日清空訊號（修改版） ===
+# === 每日清空訊號 ===
 def daily_reset():
     global sent_signals
     sent_signals.clear()
     print("🧹 每日訊號已清空")
     update_today_top3()
     save_state()
+    send_telegram_message("🧹 今日訊號已清空，Top3 已更新")
 
-    # ✅ 發送包含今日 Top3 的通知
-    top3_text = ", ".join(today_top3) if today_top3 else "無資料"
-    send_telegram_message(f"🧹 今日訊號已清空\n📊 今日 Top3：{top3_text}")
-
-# === 檢查吞沒訊號（15m / 30m） ===
+# === 檢查吞沒訊號（以收盤K線為準） ===
 def check_signals():
     global last_check_time
     cleanup_old_signals()
@@ -135,33 +132,34 @@ def check_signals():
             if df.empty or len(df) < 60:
                 continue
 
-            prev_open, prev_close = df['open'].iloc[-3], df['close'].iloc[-3]
-            open_, close_, high_, low_ = df['open'].iloc[-2], df['close'].iloc[-2], df['high'].iloc[-2], df['low'].iloc[-2]
-            ema12, ema30, ema55 = df['EMA12'].iloc[-2], df['EMA30'].iloc[-2], df['EMA55'].iloc[-2]
-            candle_time = df['ts'].iloc[-2].strftime('%Y-%m-%d %H:%M')
+            # === 使用最後一根收盤K線判斷吞沒 ===
+            prev_open, prev_close = df['open'].iloc[-2], df['close'].iloc[-2]
+            open_, close_, high_, low_ = df['open'].iloc[-1], df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
+            ema12, ema30, ema55 = df['EMA12'].iloc[-1], df['EMA30'].iloc[-1], df['EMA55'].iloc[-1]
+            candle_time = df['ts'].iloc[-1].strftime('%Y-%m-%d %H:%M')
             bull_key = f"{symbol}-{bar}-{candle_time}-bull"
             bear_key = f"{symbol}-{bar}-{candle_time}-bear"
             is_top3 = symbol in today_top3
 
-            # === 看漲吞沒（碰 EMA30 或收線於 EMA30 下方，但未碰 EMA55） ===
+            # === 看漲吞沒（碰或跌破 EMA30 未碰 EMA55） ===
             if ema12 > ema30 > ema55 and (
                 (low_ <= ema30 < high_ and low_ > ema55) or
                 (low_ <= ema30 and close_ < ema30 and low_ > ema55)
             ) and prev_close < prev_open and close_ > open_ and close_ > prev_open and open_ < prev_close \
               and bull_key not in sent_signals:
                 prefix = "🔥 Top3 " if is_top3 else "🟢"
-                msg = f"{prefix}{symbol} [{bar}]\n看漲吞沒（碰或跌破 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
+                msg = f"{prefix}{symbol} [{bar}]\n看漲吞沒（收盤K線確認）\n碰或跌破 EMA30 未碰 EMA55\n收盤: {close_} ({candle_time})"
                 send_telegram_message(msg)
                 sent_signals[bull_key] = datetime.utcnow()
 
-            # === 看跌吞沒（碰 EMA30 或收線於 EMA30 上方，但未碰 EMA55） ===
+            # === 看跌吞沒（碰或突破 EMA30 未碰 EMA55） ===
             if ema12 < ema30 < ema55 and (
                 (high_ >= ema30 > low_ and high_ < ema55) or
                 (high_ >= ema30 and close_ > ema30 and high_ < ema55)
             ) and prev_close > prev_open and close_ < open_ and close_ < prev_open and open_ > prev_close \
               and bear_key not in sent_signals:
                 prefix = "🔥 Top3 " if is_top3 else "🔴"
-                msg = f"{prefix}{symbol} [{bar}]\n看跌吞沒（碰或突破 EMA30 未碰 EMA55）\n收盤: {close_} ({candle_time})"
+                msg = f"{prefix}{symbol} [{bar}]\n看跌吞沒（收盤K線確認）\n碰或突破 EMA30 未碰 EMA55\n收盤: {close_} ({candle_time})"
                 send_telegram_message(msg)
                 sent_signals[bear_key] = datetime.utcnow()
 
@@ -218,7 +216,7 @@ scheduler.start()
 # === 啟動立即執行 ===
 load_state()
 update_today_top3()
-send_telegram_message("🚀 OKX EMA 吞沒監控已啟動 ✅\n" + ("今日 Top3: " + ", ".join(today_top3) if today_top3 else "無 Top3"))
+send_telegram_message("🚀 OKX EMA 吞沒監控已啟動 ✅\n(以收盤K線判斷吞沒)\n" + ("今日 Top3: " + ", ".join(today_top3) if today_top3 else "無 Top3"))
 check_signals()
 check_timezone()
 
