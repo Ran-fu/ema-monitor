@@ -78,13 +78,13 @@ def is_bearish_engulfing(df):
     prev, curr = df.iloc[-2], df.iloc[-1]
     return curr['c'] < curr['o'] and prev['c'] > prev['o'] and curr['c'] <= prev['o'] and curr['o'] >= prev['c']
 
-# ===== 判斷進場訊號（核心策略對應 TV v6） =====
+# ===== 判斷進場訊號（核心策略） =====
 def check_signal(symbol):
     df = fetch_klines(symbol)
-    if df is None or len(df)<60: return
+    if df is None or len(df)<60: 
+        return
     df = add_ema(df)
     last = df.iloc[-1]
-    prev = df.iloc[-2]
 
     # 多單條件：EMA 多頭 + 回踩 EMA30 未碰 EMA55 + 看漲吞沒
     bull_trend = last['EMA12'] > last['EMA30'] > last['EMA55']
@@ -104,7 +104,8 @@ def check_signal(symbol):
 
     if signal:
         key = f"{symbol}_{last.name}"
-        if key in sent_signals: return
+        if key in sent_signals: 
+            return
         sent_signals[key] = True
         save_state()
 
@@ -130,7 +131,7 @@ def ping_system():
 # ===== 排程 =====
 scheduler = BackgroundScheduler(timezone=tz)
 scheduler.add_job(lambda: [check_signal(s) for s in fetch_symbols()], 'cron', minute='2')  # 每30分K收盤後2分鐘
-scheduler.add_job(ping_system, 'interval', minutes=60)  # 每小時 Ping
+scheduler.add_job(ping_system, 'interval', minutes=60)  # 每小時自動 Ping
 scheduler.start()
 
 # ===== 啟動立即 Ping =====
