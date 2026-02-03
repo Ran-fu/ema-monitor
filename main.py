@@ -11,8 +11,8 @@ app = Flask(__name__)
 tz = ZoneInfo("Asia/Taipei")
 
 # ===== Telegram 設定 =====
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "你的Token")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "你的ChatID")
+TELEGRAM_BOT_TOKEN = "8464878708:AAE4PmcsAa5Xk1g8w0eZb4o67wLPbNA885Q"
+TELEGRAM_CHAT_ID = "1634751416"
 
 # ===== 狀態紀錄 =====
 STATE_FILE = "state.json"
