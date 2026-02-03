@@ -1,149 +1,144 @@
-//@version=6
-strategy(
-    "EMA 回踩吞沒策略（雙 TP 分批最終版）v6",
-    overlay = true,
-    initial_capital = 10000,
-    default_qty_type = strategy.percent_of_equity,
-    default_qty_value = 10
-)
+from flask import Flask
+from apscheduler.schedulers.background import BackgroundScheduler
+import requests
+import pandas as pd
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import os
+import json
 
-//==================== 參數 ====================
-emaFastLen = input.int(12, "EMA 12")
-emaMidLen  = input.int(30, "EMA 30（回踩）")
-emaSlowLen = input.int(55, "EMA 55（防守）")
+app = Flask(__name__)
+tz = ZoneInfo("Asia/Taipei")
 
-lineLen = input.int(90, "水平線長度（K）", minval = 10)
+# ===== Telegram 設定 =====
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "你的Token")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "你的ChatID")
 
-//==================== EMA ====================
-emaFast = ta.ema(close, emaFastLen)
-emaMid  = ta.ema(close, emaMidLen)
-emaSlow = ta.ema(close, emaSlowLen)
+# ===== 狀態紀錄 =====
+STATE_FILE = "state.json"
+if os.path.exists(STATE_FILE):
+    with open(STATE_FILE, "r") as f:
+        sent_signals = json.load(f)
+else:
+    sent_signals = {}
 
-plot(emaFast, color=color.orange)
-plot(emaMid,  color=color.gray)
-plot(emaSlow, color=color.blue)
+def save_state():
+    with open(STATE_FILE, "w") as f:
+        json.dump(sent_signals, f, indent=2, default=str)
 
-//==================== 趨勢 ====================
-bullTrend = emaFast > emaMid and emaMid > emaSlow
-bearTrend = emaFast < emaMid and emaMid < emaSlow
+# ===== Telegram 發送 =====
+def send_telegram_message(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode":"Markdown"}
+    try:
+        requests.post(url, data=data, timeout=10)
+    except Exception as e:
+        print("Telegram 發送失敗:", e)
 
-//==================== 回踩 ====================
-bullPullback = low <= emaMid and low > emaSlow
-bearPullback = high >= emaMid and high < emaSlow
+# ===== 取得全 USDT 永續合約幣種 =====
+def fetch_symbols():
+    try:
+        res = requests.get("https://www.okx.com/api/v5/public/instruments?instType=SWAP", timeout=10)
+        data = res.json()
+        symbols = [d['instId'].replace("-USDT-SWAP","") 
+                   for d in data.get('data',[]) if d['instId'].endswith("-USDT-SWAP")]
+        return symbols
+    except:
+        return []
 
-//==================== 吞沒 ====================
-bullEngulf = (
-    close > open and
-    close[1] < open[1] and
-    close >= open[1] and
-    open <= close[1]
-)
+# ===== 取得 K 線資料 =====
+def fetch_klines(symbol, interval='30m', limit=100):
+    try:
+        res = requests.get(f"https://www.okx.com/api/v5/market/candles?instId={symbol}-USDT-SWAP&bar={interval}&limit={limit}", timeout=10)
+        data = res.json().get('data', [])
+        if not data: return None
+        df = pd.DataFrame(data, columns=['ts','o','h','l','c','vol','other1','other2','other3'])
+        df[['o','h','l','c','vol']] = df[['o','h','l','c','vol']].astype(float)
+        df['ts'] = pd.to_datetime(df['ts'].astype(float), unit='ms', errors='coerce')
+        df.dropna(subset=['ts'], inplace=True)
+        df.set_index('ts', inplace=True)
+        return df
+    except Exception as e:
+        print(f"{symbol} K線抓取錯誤:", e)
+        return None
 
-bearEngulf = (
-    close < open and
-    close[1] > open[1] and
-    open >= close[1] and
-    close <= open[1]
-)
+# ===== EMA 計算 =====
+def add_ema(df):
+    df['EMA12'] = df['c'].ewm(span=12, adjust=False).mean()
+    df['EMA30'] = df['c'].ewm(span=30, adjust=False).mean()
+    df['EMA55'] = df['c'].ewm(span=55, adjust=False).mean()
+    return df
 
-//==================== 訊號 ====================
-longSignal  = bullTrend and bullPullback and bullEngulf
-shortSignal = bearTrend and bearPullback and bearEngulf
+# ===== 吞沒形態判斷 =====
+def is_bullish_engulfing(df):
+    prev, curr = df.iloc[-2], df.iloc[-1]
+    return curr['c'] > curr['o'] and prev['c'] < prev['o'] and curr['c'] >= prev['o'] and curr['o'] <= prev['c']
 
-//==================== 物件（只保留最新一組） ====================
-var line  entryLine = na
-var line  slLine    = na
-var line  tp1Line   = na
-var line  tp2Line   = na
+def is_bearish_engulfing(df):
+    prev, curr = df.iloc[-2], df.iloc[-1]
+    return curr['c'] < curr['o'] and prev['c'] > prev['o'] and curr['c'] <= prev['o'] and curr['o'] >= prev['c']
 
-var label entryLab  = na
-var label slLab     = na
-var label tp1Lab    = na
-var label tp2Lab    = na
+# ===== 判斷進場訊號（核心策略對應 TV v6） =====
+def check_signal(symbol):
+    df = fetch_klines(symbol)
+    if df is None or len(df)<60: return
+    df = add_ema(df)
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
 
-f_clear() =>
-    if not na(entryLine)
-        line.delete(entryLine)
-        line.delete(slLine)
-        line.delete(tp1Line)
-        line.delete(tp2Line)
-        label.delete(entryLab)
-        label.delete(slLab)
-        label.delete(tp1Lab)
-        label.delete(tp2Lab)
+    # 多單條件：EMA 多頭 + 回踩 EMA30 未碰 EMA55 + 看漲吞沒
+    bull_trend = last['EMA12'] > last['EMA30'] > last['EMA55']
+    bull_pullback = last['l'] <= last['EMA30'] and last['l'] > last['EMA55']
+    bull_engulf = is_bullish_engulfing(df)
+    bullish_signal = bull_trend and bull_pullback and bull_engulf
 
-//==================== 多單 ====================
-if longSignal
-    f_clear()
+    # 空單條件：EMA 空頭 + 回踩 EMA30 未碰 EMA55 + 看跌吞沒
+    bear_trend = last['EMA12'] < last['EMA30'] < last['EMA55']
+    bear_pullback = last['h'] >= last['EMA30'] and last['h'] < last['EMA55']
+    bear_engulf = is_bearish_engulfing(df)
+    bearish_signal = bear_trend and bear_pullback and bear_engulf
 
-    entry = close
-    sl    = emaSlow
-    risk  = entry - sl
+    signal = None
+    if bullish_signal: signal = '多頭'
+    elif bearish_signal: signal = '空頭'
 
-    tp1 = entry + risk * 1.0
-    tp2 = entry + risk * 1.5
+    if signal:
+        key = f"{symbol}_{last.name}"
+        if key in sent_signals: return
+        sent_signals[key] = True
+        save_state()
 
-    strategy.entry("Long", strategy.long)
+        entry = last['c']
+        stoploss = last['EMA55']
+        risk = abs(entry - stoploss)
+        tp1 = entry + risk if signal=='多頭' else entry - risk
+        tp2 = entry + risk*1.5 if signal=='多頭' else entry - risk*1.5
 
-    // 分批出場
-    strategy.exit("Long TP1", "Long", limit = tp1, stop = sl, qty_percent = 50)
-    strategy.exit("Long TP2", "Long", limit = tp2, stop = sl, qty_percent = 50)
+        msg = (
+            f"📊 {symbol} {signal}訊號\n"
+            f"進場價: {entry:.2f}\n止損(EMA55): {stoploss:.2f}\n"
+            f"止盈1:1: {tp1:.2f}\n止盈1:1.5: {tp2:.2f}\n"
+            f"條件: EMA多空排列 + EMA30回踩 + 完整吞沒"
+        )
+        send_telegram_message(msg)
 
-    // 畫線
-    entryLine := line.new(bar_index, entry, bar_index + lineLen, entry, color=color.white, width=2)
-    slLine    := line.new(bar_index, sl,    bar_index + lineLen, sl,    color=color.red,   width=2)
-    tp1Line   := line.new(bar_index, tp1,   bar_index + lineLen, tp1,   color=color.green, width=2)
-    tp2Line   := line.new(bar_index, tp2,   bar_index + lineLen, tp2,   color=color.teal,  width=2)
+# ===== 系統自動 Ping =====
+def ping_system():
+    symbols = fetch_symbols()
+    send_telegram_message(f"✅ 系統在線中\n監控幣種數量: {len(symbols)}")
 
-    // 標籤（在三角形左邊）
-    entryLab := label.new(bar_index - 1, entry, "Entry\n" + str.tostring(entry),
-        style=label.style_label_right, textcolor=color.white, color=color.black)
+# ===== 排程 =====
+scheduler = BackgroundScheduler(timezone=tz)
+scheduler.add_job(lambda: [check_signal(s) for s in fetch_symbols()], 'cron', minute='2')  # 每30分K收盤後2分鐘
+scheduler.add_job(ping_system, 'interval', minutes=60)  # 每小時 Ping
+scheduler.start()
 
-    slLab := label.new(bar_index - 1, sl, "SL\n" + str.tostring(sl),
-        style=label.style_label_right, textcolor=color.white, color=color.red)
+# ===== 啟動立即 Ping =====
+ping_system()
 
-    tp1Lab := label.new(bar_index - 1, tp1, "TP1 1:1\n" + str.tostring(tp1),
-        style=label.style_label_right, textcolor=color.white, color=color.green)
+@app.route('/')
+def home():
+    return "OKX EMA 全幣種升級策略監控系統在線中 ✅"
 
-    tp2Lab := label.new(bar_index - 1, tp2, "TP2 1:1.5\n" + str.tostring(tp2),
-        style=label.style_label_right, textcolor=color.white, color=color.teal)
-
-//==================== 空單 ====================
-if shortSignal
-    f_clear()
-
-    entry = close
-    sl    = emaSlow
-    risk  = sl - entry
-
-    tp1 = entry - risk * 1.0
-    tp2 = entry - risk * 1.5
-
-    strategy.entry("Short", strategy.short)
-
-    // 分批出場
-    strategy.exit("Short TP1", "Short", limit = tp1, stop = sl, qty_percent = 50)
-    strategy.exit("Short TP2", "Short", limit = tp2, stop = sl, qty_percent = 50)
-
-    // 畫線
-    entryLine := line.new(bar_index, entry, bar_index + lineLen, entry, color=color.white, width=2)
-    slLine    := line.new(bar_index, sl,    bar_index + lineLen, sl,    color=color.red,   width=2)
-    tp1Line   := line.new(bar_index, tp1,   bar_index + lineLen, tp1,   color=color.green, width=2)
-    tp2Line   := line.new(bar_index, tp2,   bar_index + lineLen, tp2,   color=color.teal,  width=2)
-
-    // 標籤
-    entryLab := label.new(bar_index - 1, entry, "Entry\n" + str.tostring(entry),
-        style=label.style_label_right, textcolor=color.white, color=color.black)
-
-    slLab := label.new(bar_index - 1, sl, "SL\n" + str.tostring(sl),
-        style=label.style_label_right, textcolor=color.white, color=color.red)
-
-    tp1Lab := label.new(bar_index - 1, tp1, "TP1 1:1\n" + str.tostring(tp1),
-        style=label.style_label_right, textcolor=color.white, color=color.green)
-
-    tp2Lab := label.new(bar_index - 1, tp2, "TP2 1:1.5\n" + str.tostring(tp2),
-        style=label.style_label_right, textcolor=color.white, color=color.teal)
-
-//==================== 三角形 ====================
-plotshape(longSignal,  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small)
-plotshape(shortSignal, style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT',5000)))
