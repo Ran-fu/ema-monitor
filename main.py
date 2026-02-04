@@ -5,7 +5,6 @@ import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import os
-import json
 
 app = Flask(__name__)
 tz = ZoneInfo("Asia/Taipei")
@@ -14,22 +13,13 @@ tz = ZoneInfo("Asia/Taipei")
 TELEGRAM_BOT_TOKEN = "8464878708:AAE4PmcsAa5Xk1g8w0eZb4o67wLPbNA885Q"
 TELEGRAM_CHAT_ID = "1634751416"
 
-# ===== 狀態紀錄 =====
-STATE_FILE = "state.json"
-if os.path.exists(STATE_FILE):
-    with open(STATE_FILE, "r") as f:
-        sent_signals = json.load(f)
-else:
-    sent_signals = {}
-
-def save_state():
-    with open(STATE_FILE, "w") as f:
-        json.dump(sent_signals, f, indent=2, default=str)
+# ===== 狀態紀錄（防重複）=====
+sent_signals = {}
 
 # ===== Telegram 發送 =====
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode":"Markdown"}
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     try:
         requests.post(url, data=data, timeout=10)
     except Exception as e:
@@ -38,108 +28,148 @@ def send_telegram_message(message):
 # ===== 取得全 USDT 永續合約幣種 =====
 def fetch_symbols():
     try:
-        res = requests.get("https://www.okx.com/api/v5/public/instruments?instType=SWAP", timeout=10)
+        res = requests.get(
+            "https://www.okx.com/api/v5/public/instruments?instType=SWAP",
+            timeout=10
+        )
         data = res.json()
-        symbols = [d['instId'].replace("-USDT-SWAP","") 
-                   for d in data.get('data',[]) if d['instId'].endswith("-USDT-SWAP")]
+        symbols = []
+        for d in data.get("data", []):
+            instId = d["instId"]
+            if instId.endswith("-USDT-SWAP"):
+                symbols.append(instId.replace("-USDT-SWAP", ""))
         return symbols
     except:
         return []
 
-# ===== 取得 K 線資料 =====
-def fetch_klines(symbol, interval='30m', limit=100):
+# ===== 取得 K 線 =====
+def fetch_klines(symbol, interval="30m", limit=100):
     try:
-        res = requests.get(f"https://www.okx.com/api/v5/market/candles?instId={symbol}-USDT-SWAP&bar={interval}&limit={limit}", timeout=10)
-        data = res.json().get('data', [])
-        if not data: return None
-        df = pd.DataFrame(data, columns=['ts','o','h','l','c','vol','other1','other2','other3'])
-        df[['o','h','l','c','vol']] = df[['o','h','l','c','vol']].astype(float)
-        df['ts'] = pd.to_datetime(df['ts'].astype(float), unit='ms', errors='coerce')
-        df.dropna(subset=['ts'], inplace=True)
-        df.set_index('ts', inplace=True)
-        return df
+        url = (
+            f"https://www.okx.com/api/v5/market/candles"
+            f"?instId={symbol}-USDT-SWAP&bar={interval}&limit={limit}"
+        )
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        if "data" not in data or not data["data"]:
+            return None
+
+        df = pd.DataFrame(
+            data["data"],
+            columns=["ts","o","h","l","c","vol","x1","x2","x3"]
+        )
+        df[["o","h","l","c","vol"]] = df[["o","h","l","c","vol"]].astype(float)
+
+        # === 關鍵：OKX UTC → Asia/Taipei ===
+        df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+        df["ts"] = df["ts"].dt.tz_convert(tz)
+        df.set_index("ts", inplace=True)
+
+        return df.sort_index()
     except Exception as e:
-        print(f"{symbol} K線抓取錯誤:", e)
+        print(f"{symbol} K 線錯誤:", e)
         return None
 
-# ===== EMA 計算 =====
+# ===== EMA =====
 def add_ema(df):
-    df['EMA12'] = df['c'].ewm(span=12, adjust=False).mean()
-    df['EMA30'] = df['c'].ewm(span=30, adjust=False).mean()
-    df['EMA55'] = df['c'].ewm(span=55, adjust=False).mean()
+    df["EMA12"] = df["c"].ewm(span=12, adjust=False).mean()
+    df["EMA30"] = df["c"].ewm(span=30, adjust=False).mean()
+    df["EMA55"] = df["c"].ewm(span=55, adjust=False).mean()
     return df
 
-# ===== 吞沒形態判斷 =====
-def is_bullish_engulfing(df):
-    prev, curr = df.iloc[-2], df.iloc[-1]
-    return curr['c'] > curr['o'] and prev['c'] < prev['o'] and curr['c'] >= prev['o'] and curr['o'] <= prev['c']
+# ===== 吞沒判斷（跟 TV 一致）=====
+def bullish_engulf(prev, curr):
+    return (
+        curr["c"] > curr["o"] and
+        prev["c"] < prev["o"] and
+        curr["c"] >= prev["o"] and
+        curr["o"] <= prev["c"]
+    )
 
-def is_bearish_engulfing(df):
-    prev, curr = df.iloc[-2], df.iloc[-1]
-    return curr['c'] < curr['o'] and prev['c'] > prev['o'] and curr['c'] <= prev['o'] and curr['o'] >= prev['c']
+def bearish_engulf(prev, curr):
+    return (
+        curr["c"] < curr["o"] and
+        prev["c"] > prev["o"] and
+        curr["o"] >= prev["c"] and
+        curr["c"] <= prev["o"]
+    )
 
-# ===== 判斷進場訊號（核心策略） =====
+# ===== 核心策略檢查 =====
 def check_signal(symbol):
     df = fetch_klines(symbol)
-    if df is None or len(df)<60: 
+    if df is None or len(df) < 60:
         return
+
     df = add_ema(df)
-    last = df.iloc[-1]
 
-    # 多單條件：EMA 多頭 + 回踩 EMA30 未碰 EMA55 + 看漲吞沒
-    bull_trend = last['EMA12'] > last['EMA30'] > last['EMA55']
-    bull_pullback = last['l'] <= last['EMA30'] and last['l'] > last['EMA55']
-    bull_engulf = is_bullish_engulfing(df)
-    bullish_signal = bull_trend and bull_pullback and bull_engulf
+    # === 只用已收盤 K 線（對齊 TV）===
+    curr = df.iloc[-2]
+    prev = df.iloc[-3]
 
-    # 空單條件：EMA 空頭 + 回踩 EMA30 未碰 EMA55 + 看跌吞沒
-    bear_trend = last['EMA12'] < last['EMA30'] < last['EMA55']
-    bear_pullback = last['h'] >= last['EMA30'] and last['h'] < last['EMA55']
-    bear_engulf = is_bearish_engulfing(df)
-    bearish_signal = bear_trend and bear_pullback and bear_engulf
+    # === 趨勢 ===
+    bull_trend = curr["EMA12"] > curr["EMA30"] > curr["EMA55"]
+    bear_trend = curr["EMA12"] < curr["EMA30"] < curr["EMA55"]
 
-    signal = None
-    if bullish_signal: signal = '多頭'
-    elif bearish_signal: signal = '空頭'
+    # === 回踩 EMA30（不碰 EMA55）===
+    bull_pullback = curr["l"] <= curr["EMA30"] and curr["l"] > curr["EMA55"]
+    bear_pullback = curr["h"] >= curr["EMA30"] and curr["h"] < curr["EMA55"]
 
-    if signal:
-        key = f"{symbol}_{last.name}"
-        if key in sent_signals: 
-            return
-        sent_signals[key] = True
-        save_state()
+    # === 吞沒 ===
+    bull_signal = bull_trend and bull_pullback and bullish_engulf(prev, curr)
+    bear_signal = bear_trend and bear_pullback and bearish_engulf(prev, curr)
 
-        entry = last['c']
-        stoploss = last['EMA55']
-        risk = abs(entry - stoploss)
-        tp1 = entry + risk if signal=='多頭' else entry - risk
-        tp2 = entry + risk*1.5 if signal=='多頭' else entry - risk*1.5
+    if not bull_signal and not bear_signal:
+        return
 
-        msg = (
-            f"📊 {symbol} {signal}訊號\n"
-            f"進場價: {entry:.2f}\n止損(EMA55): {stoploss:.2f}\n"
-            f"止盈1:1: {tp1:.2f}\n止盈1:1.5: {tp2:.2f}\n"
-            f"條件: EMA多空排列 + EMA30回踩 + 完整吞沒"
-        )
-        send_telegram_message(msg)
+    # === 防同一根 K 重複 ===
+    k_time = curr.name.floor("30T")
+    key = f"{symbol}_{k_time}"
+    if key in sent_signals:
+        return
+    sent_signals[key] = True
 
-# ===== 系統自動 Ping =====
+    entry = curr["c"]
+    sl = curr["EMA55"]
+    risk = abs(entry - sl)
+
+    tp1 = entry + risk if bull_signal else entry - risk
+    tp2 = entry + risk * 1.5 if bull_signal else entry - risk * 1.5
+    side = "多頭" if bull_signal else "空頭"
+
+    msg = (
+        f"📊 {symbol} {side}訊號\n"
+        f"K線時間: {k_time.strftime('%Y-%m-%d %H:%M')}\n"
+        f"進場: {entry:.4f}\n"
+        f"止損 EMA55: {sl:.4f}\n"
+        f"TP1 1:1: {tp1:.4f}\n"
+        f"TP2 1:1.5: {tp2:.4f}"
+    )
+    send_telegram_message(msg)
+
+# ===== 系統 Ping =====
 def ping_system():
-    symbols = fetch_symbols()
-    send_telegram_message(f"✅ 系統在線中\n監控幣種數量: {len(symbols)}")
+    now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+    count = len(fetch_symbols())
+    send_telegram_message(
+        f"✅ 系統在線中\n時間: {now}\n監控幣種數量: {count}"
+    )
 
 # ===== 排程 =====
 scheduler = BackgroundScheduler(timezone=tz)
-scheduler.add_job(lambda: [check_signal(s) for s in fetch_symbols()], 'cron', minute='2')  # 每30分K收盤後2分鐘
-scheduler.add_job(ping_system, 'interval', minutes=60)  # 每小時自動 Ping
+scheduler.add_job(
+    lambda: [check_signal(s) for s in fetch_symbols()],
+    "cron",
+    minute="0,30"
+)
+scheduler.add_job(ping_system, "interval", minutes=60)
 scheduler.start()
 
-# ===== 啟動立即 Ping =====
+# ===== 啟動即 Ping =====
 ping_system()
 
-@app.route('/')
+@app.route("/")
 def home():
-    return "OKX EMA 全幣種升級策略監控系統在線中 ✅"
+    return "OKX EMA 回踩吞沒策略監控中 ✅"
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT',5000)))
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
