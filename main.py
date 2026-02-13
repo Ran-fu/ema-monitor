@@ -28,8 +28,6 @@ def send_telegram_message(text):
 def safe_ts(x):
     try:
         x = int(float(x))
-        if x > 1e13:
-            return pd.NaT
         return pd.to_datetime(x, unit="ms", utc=True).tz_convert(tz)
     except:
         return pd.NaT
@@ -50,7 +48,7 @@ def fetch_symbols():
         return []
 
 # ================== 取得 K 線 ==================
-def fetch_klines(symbol, bar="30m", limit=100):
+def fetch_klines(symbol, bar="30m", limit=120):
     try:
         url = "https://www.okx.com/api/v5/market/candles"
         params = {
@@ -104,7 +102,7 @@ def bear_engulf(prev, curr):
         curr["c"] <= prev["o"]
     )
 
-# ================== 核心策略（已修正對齊 TV） ==================
+# ================== 核心策略（TV 完全同步版） ==================
 def check_signal(symbol):
     df = fetch_klines(symbol)
     if df is None or len(df) < 60:
@@ -112,15 +110,30 @@ def check_signal(symbol):
 
     df = add_ema(df)
 
-    # 🔥 改成使用「已收盤K」
+    # 🔥 只使用已收盤K
     prev = df.iloc[-3]
     curr = df.iloc[-2]
 
+    # 🔥 強制30分鐘對齊
+    if curr.name.minute not in (0, 30):
+        return
+
+    # ====== EMA 多空排列 ======
     bull_trend = curr["EMA12"] > curr["EMA30"] > curr["EMA55"]
     bear_trend = curr["EMA12"] < curr["EMA30"] < curr["EMA55"]
 
-    bull_pullback = curr["l"] <= curr["EMA30"] and curr["l"] > curr["EMA55"]
-    bear_pullback = curr["h"] >= curr["EMA30"] and curr["h"] < curr["EMA55"]
+    # ====== 第一次回踩 EMA30 且未碰 EMA55 ======
+    bull_pullback = (
+        curr["l"] <= curr["EMA30"] and
+        curr["l"] > curr["EMA55"] and
+        prev["l"] > prev["EMA30"]
+    )
+
+    bear_pullback = (
+        curr["h"] >= curr["EMA30"] and
+        curr["h"] < curr["EMA55"] and
+        prev["h"] < prev["EMA30"]
+    )
 
     long_signal = bull_trend and bull_pullback and bull_engulf(prev, curr)
     short_signal = bear_trend and bear_pullback and bear_engulf(prev, curr)
@@ -171,9 +184,10 @@ def ping_system():
 # ================== Scheduler ==================
 scheduler = BackgroundScheduler(timezone=tz)
 
-# 🔥 改成收盤後 2 分鐘
+# 收盤後 2 分鐘掃描
 scheduler.add_job(scan_all, "cron", minute="2,32")
 
+# 每小時 ping
 scheduler.add_job(ping_system, "interval", minutes=60)
 
 scheduler.start()
@@ -183,7 +197,7 @@ ping_system()
 # ================== Flask ==================
 @app.route("/")
 def home():
-    return "OKX EMA TV 對齊策略監控中 ✅"
+    return "OKX EMA TV 完全同步策略運行中 ✅"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
