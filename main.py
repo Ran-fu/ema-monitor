@@ -11,7 +11,7 @@ import os
 app = Flask(__name__)
 tz = ZoneInfo("Asia/Taipei")
 
-TELEGRAM_BOT_TOKEN = "你的TOKEN"
+TELEGRAM_BOT_TOKEN = "8464878708:AAE4PmcsAa5Xk1g8w0eZb4o67wLPbNA885Q"
 TELEGRAM_CHAT_ID = "1634751416"
 
 sent_signals = {}
