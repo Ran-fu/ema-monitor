@@ -11,10 +11,9 @@ import os
 app = Flask(__name__)
 tz = ZoneInfo("Asia/Taipei")
 
-TELEGRAM_BOT_TOKEN = "8464878708:AAE4PmcsAa5Xk1g8w0eZb4o67wLPbNA885Q"
+TELEGRAM_BOT_TOKEN = "你的TOKEN"
 TELEGRAM_CHAT_ID = "1634751416"
 
-# 避免重複發送
 sent_signals = {}
 
 # ================== Telegram ==================
@@ -25,7 +24,7 @@ def send_telegram_message(text):
     except Exception as e:
         print("TG 發送失敗:", e)
 
-# ================== 安全時間轉換（修正 overflow） ==================
+# ================== 安全時間轉換 ==================
 def safe_ts(x):
     try:
         x = int(float(x))
@@ -50,7 +49,7 @@ def fetch_symbols():
         print("fetch_symbols 錯誤:", e)
         return []
 
-# ================== 取得 K 線（不 resample、不 floor） ==================
+# ================== 取得 K 線 ==================
 def fetch_klines(symbol, bar="30m", limit=100):
     try:
         url = "https://www.okx.com/api/v5/market/candles"
@@ -68,11 +67,14 @@ def fetch_klines(symbol, bar="30m", limit=100):
             data,
             columns=["ts","o","h","l","c","vol","x1","x2","x3"]
         )
+
         df["ts"] = df["ts"].apply(safe_ts)
         df = df.dropna(subset=["ts"])
         df[["o","h","l","c"]] = df[["o","h","l","c"]].astype(float)
+
         df = df.sort_values("ts")
         df.set_index("ts", inplace=True)
+
         return df
     except Exception as e:
         print(f"{symbol} K 線錯誤:", e)
@@ -85,7 +87,7 @@ def add_ema(df):
     df["EMA55"] = df["c"].ewm(span=55, adjust=False).mean()
     return df
 
-# ================== 吞沒（完全對齊 TV） ==================
+# ================== 吞沒 ==================
 def bull_engulf(prev, curr):
     return (
         curr["c"] > curr["o"] and
@@ -102,21 +104,21 @@ def bear_engulf(prev, curr):
         curr["c"] <= prev["o"]
     )
 
-# ================== 核心策略（= TV） ==================
+# ================== 核心策略（已修正對齊 TV） ==================
 def check_signal(symbol):
     df = fetch_klines(symbol)
     if df is None or len(df) < 60:
         return
 
     df = add_ema(df)
-    prev = df.iloc[-2]
-    curr = df.iloc[-1]
 
-    # 多空排列
+    # 🔥 改成使用「已收盤K」
+    prev = df.iloc[-3]
+    curr = df.iloc[-2]
+
     bull_trend = curr["EMA12"] > curr["EMA30"] > curr["EMA55"]
     bear_trend = curr["EMA12"] < curr["EMA30"] < curr["EMA55"]
 
-    # 回踩 EMA30，不碰 EMA55
     bull_pullback = curr["l"] <= curr["EMA30"] and curr["l"] > curr["EMA55"]
     bear_pullback = curr["h"] >= curr["EMA30"] and curr["h"] < curr["EMA55"]
 
@@ -168,11 +170,14 @@ def ping_system():
 
 # ================== Scheduler ==================
 scheduler = BackgroundScheduler(timezone=tz)
-scheduler.add_job(scan_all, "cron", minute="*/30")
+
+# 🔥 改成收盤後 2 分鐘
+scheduler.add_job(scan_all, "cron", minute="2,32")
+
 scheduler.add_job(ping_system, "interval", minutes=60)
+
 scheduler.start()
 
-# 啟動即 ping
 ping_system()
 
 # ================== Flask ==================
