@@ -11,18 +11,25 @@ import os
 app = Flask(__name__)
 tz = ZoneInfo("Asia/Taipei")
 
+# 這是你的密鑰與頻道，請妥善保管
 TELEGRAM_BOT_TOKEN = "8464878708:AAE4PmcsAa5Xk1g8w0eZb4o67wLPbNA885Q"
 TELEGRAM_CHAT_ID = "1634751416"
 
+# 紀錄已發送訊號與清理時間
 sent_signals = {}
+last_cleanup_day = datetime.now(tz).day
 
-# ================== Telegram ==================
+# ================== Telegram (增加重試機制) ==================
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    try:
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
-    except Exception as e:
-        print("TG 發送失敗:", e)
+    for i in range(3):  # 最多重試 3 次，確保通知不漏接
+        try:
+            r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=15)
+            if r.status_code == 200:
+                return
+        except Exception as e:
+            print(f"TG 發送失敗 (第{i+1}次):", e)
+            time.sleep(2)
 
 # ================== 安全時間轉換 ==================
 def safe_ts(x):
@@ -78,62 +85,42 @@ def fetch_klines(symbol, bar="30m", limit=120):
         print(f"{symbol} K 線錯誤:", e)
         return None
 
-# ================== EMA ==================
+# ================== 技術指標與形態 ==================
 def add_ema(df):
     df["EMA12"] = df["c"].ewm(span=12, adjust=False).mean()
     df["EMA30"] = df["c"].ewm(span=30, adjust=False).mean()
     df["EMA55"] = df["c"].ewm(span=55, adjust=False).mean()
     return df
 
-# ================== 吞沒 ==================
 def bull_engulf(prev, curr):
-    return (
-        curr["c"] > curr["o"] and
-        prev["c"] < prev["o"] and
-        curr["c"] >= prev["o"] and
-        curr["o"] <= prev["c"]
-    )
+    return (curr["c"] > curr["o"] and prev["c"] < prev["o"] and 
+            curr["c"] >= prev["o"] and curr["o"] <= prev["c"])
 
 def bear_engulf(prev, curr):
-    return (
-        curr["c"] < curr["o"] and
-        prev["c"] > prev["o"] and
-        curr["o"] >= prev["c"] and
-        curr["c"] <= prev["o"]
-    )
+    return (curr["c"] < curr["o"] and prev["c"] > prev["o"] and 
+            curr["o"] >= prev["c"] and curr["c"] <= prev["o"])
 
-# ================== 核心策略（TV 完全同步版） ==================
+# ================== 核心策略邏輯 ==================
 def check_signal(symbol):
     df = fetch_klines(symbol)
     if df is None or len(df) < 60:
         return
 
     df = add_ema(df)
-
-    # 🔥 只使用已收盤K
     prev = df.iloc[-3]
     curr = df.iloc[-2]
 
-    # 🔥 強制30分鐘對齊
+    # 強制 30 分鐘對齊
     if curr.name.minute not in (0, 30):
         return
 
-    # ====== EMA 多空排列 ======
+    # EMA 多空排列
     bull_trend = curr["EMA12"] > curr["EMA30"] > curr["EMA55"]
     bear_trend = curr["EMA12"] < curr["EMA30"] < curr["EMA55"]
 
-    # ====== 第一次回踩 EMA30 且未碰 EMA55 ======
-    bull_pullback = (
-        curr["l"] <= curr["EMA30"] and
-        curr["l"] > curr["EMA55"] and
-        prev["l"] > prev["EMA30"]
-    )
-
-    bear_pullback = (
-        curr["h"] >= curr["EMA30"] and
-        curr["h"] < curr["EMA55"] and
-        prev["h"] < prev["EMA30"]
-    )
+    # 第一次回踩 EMA30 且未碰 EMA55
+    bull_pullback = (curr["l"] <= curr["EMA30"] and curr["l"] > curr["EMA55"] and prev["l"] > prev["EMA30"])
+    bear_pullback = (curr["h"] >= curr["EMA30"] and curr["h"] < curr["EMA55"] and prev["h"] < prev["EMA30"])
 
     long_signal = bull_trend and bull_pullback and bull_engulf(prev, curr)
     short_signal = bear_trend and bear_pullback and bear_engulf(prev, curr)
@@ -149,55 +136,57 @@ def check_signal(symbol):
     entry = curr["c"]
     sl = curr["EMA55"]
     risk = abs(entry - sl)
+    tp1 = entry + (risk if long_signal else -risk)
+    tp2 = entry + (risk * 1.5 if long_signal else -risk * 1.5)
 
-    tp1 = entry + risk if long_signal else entry - risk
-    tp2 = entry + risk * 1.5 if long_signal else entry - risk * 1.5
-
-    side = "多單" if long_signal else "空單"
-
+    side = "🔴 空單" if short_signal else "🟢 多單"
     msg = (
         f"📊 {symbol} {side}\n"
         f"時間: {curr.name.strftime('%Y-%m-%d %H:%M')}\n"
-        f"進場: {entry:.4f}\n"
+        f"進場參考: {entry:.4f}\n"
         f"止損 EMA55: {sl:.4f}\n"
-        f"TP1 1:1: {tp1:.4f}\n"
-        f"TP2 1:1.5: {tp2:.4f}"
+        f"盈虧比 1:1 : {tp1:.4f}\n"
+        f"盈虧比 1:1.5 : {tp2:.4f}"
     )
-
     send_telegram_message(msg)
 
-# ================== 掃描 ==================
+# ================== 掃描 (增加清理與溫控邏輯) ==================
 def scan_all():
+    global last_cleanup_day, sent_signals
+    
+    # 每日清理過期訊號，避免內存占用
+    now = datetime.now(tz)
+    if now.day != last_cleanup_day:
+        sent_signals = {}
+        last_cleanup_day = now.day
+        print(f"[{now}] 系統已清理緩存紀錄")
+
     symbols = fetch_symbols()
     for s in symbols:
         try:
+            time.sleep(0.1) # 增加小延遲防止 API 限流
             check_signal(s)
         except Exception as e:
-            print("掃描錯誤:", s, e)
+            print(f"掃描錯誤 {s}: {e}")
 
-# ================== 自動 Ping ==================
+# ================== 系統監控 ==================
 def ping_system():
     now = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
-    count = len(fetch_symbols())
-    send_telegram_message(f"✅ 系統在線中\n時間: {now}\n監控幣種: {count}")
+    send_telegram_message(f"✅ 系統在線監控中\n目前時間: {now}")
 
-# ================== Scheduler ==================
+# ================== 排程設定 ==================
 scheduler = BackgroundScheduler(timezone=tz)
-
-# 收盤後 2 分鐘掃描
+# 設在 2 分與 32 分掃描，確保 K 線已收盤並產生
 scheduler.add_job(scan_all, "cron", minute="2,32")
-
-# 每小時 ping
-scheduler.add_job(ping_system, "interval", minutes=60)
-
+scheduler.add_job(ping_system, "interval", minutes=120) # 每 2 小時報平安
 scheduler.start()
 
-ping_system()
-
-# ================== Flask ==================
+# ================== Flask 入口 ==================
 @app.route("/")
 def home():
-    return "OKX EMA TV 完全同步策略運行中 ✅"
+    return f"OKX EMA 策略運作中 - 最後更新時間: {datetime.now(tz)}"
 
 if __name__ == "__main__":
+    # 初次啟動先發送一次在線通知
+    ping_system()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
