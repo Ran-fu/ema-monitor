@@ -13,8 +13,6 @@ tz = ZoneInfo("Asia/Taipei")
 # ==================== 配置 ====================
 TELEGRAM_BOT_TOKEN = "8464878708:AAE4PmcsAa5Xk1g8w0eZb4o67wLPbNA885Q"
 TELEGRAM_CHAT_ID = "1634751416"
-
-# 儲存已發送訊號
 sent_signals = {}
 
 # ==================== 工具函數 ====================
@@ -25,120 +23,78 @@ def send_telegram_message(text):
     except:
         pass
 
-def fetch_bitunix_symbols():
-    """取得 Bitunix 所有 USDT 永續合約"""
-    try:
-        url = "https://api.bitunix.com/api/v1/futures/market/tickers"
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        if data.get("code") == 0:
-            # 篩選 USDT 結算的交易對
-            return [i["symbol"] for i in data["data"] if i["symbol"].endswith("USDT")]
-        return []
-    except:
-        return []
-
 def fetch_klines(symbol, interval="30m", limit=100):
-    """取得 Bitunix K線數據"""
     try:
-        # Bitunix 參數: 1m, 5m, 15m, 30m, 1h, 4h, 1d
         url = "https://api.bitunix.com/api/v1/futures/market/candles"
-        params = {
-            "symbol": symbol,
-            "interval": interval,
-            "limit": limit
-        }
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
         r = requests.get(url, params=params, timeout=10)
         res = r.json()
-        if res.get("code") != 0 or not res.get("data"):
-            return None
-            
-        # Bitunix 格式: [timestamp, open, high, low, close, volume]
-        df = pd.DataFrame(res["data"], columns=["ts", "o", "h", "l", "c", "v"])
+        if res.get("code") != 0 or not res.get("data"): return None
         
-        # Bitunix 返回的是秒級或毫秒級，需根據實測調整，通常是毫秒
+        df = pd.DataFrame(res["data"], columns=["ts", "o", "h", "l", "c", "v"])
         df["ts"] = pd.to_datetime(df["ts"].astype(float), unit="ms", utc=True).dt.tz_convert(tz)
         df[["o", "h", "l", "c"]] = df[["o", "h", "l", "c"]].astype(float)
-        
         return df.sort_values("ts").set_index("ts")
     except:
         return None
 
-# ==================== 策略核心 (完全對齊 TV) ====================
+# ==================== 策略邏輯 ====================
 def check_signal(symbol):
-    # 1. 抓取 30m 數據
     df = fetch_klines(symbol, "30m")
     if df is None or len(df) < 60: return
 
-    # EMA 計算
     df["EMA12"] = df["c"].ewm(span=12, adjust=False).mean()
     df["EMA30"] = df["c"].ewm(span=30, adjust=False).mean()
     df["EMA55"] = df["c"].ewm(span=55, adjust=False).mean()
 
-    curr = df.iloc[-2] # 剛收盤 K
-    prev = df.iloc[-3] # 前一根 K
+    curr, prev = df.iloc[-2], df.iloc[-3]
 
-    # 趨勢與回踩判斷
-    bull_trend = curr["EMA12"] > curr["EMA30"] and curr["EMA30"] > curr["EMA55"]
-    bear_trend = curr["EMA12"] < curr["EMA30"] and curr["EMA30"] < curr["EMA55"]
-    bull_pullback = curr["l"] <= curr["EMA30"] and curr["l"] > curr["EMA55"]
-    bear_pullback = curr["h"] >= curr["EMA30"] and curr["h"] < curr["EMA55"]
+    # TV v6 核心邏輯
+    bull_trend = curr["EMA12"] > curr["EMA30"] > curr["EMA55"]
+    bear_trend = curr["EMA12"] < curr["EMA30"] < curr["EMA55"]
+    bull_pb = curr["l"] <= curr["EMA30"] and curr["l"] > curr["EMA55"]
+    bear_pb = curr["h"] >= curr["EMA30"] and curr["h"] < curr["EMA55"]
+    bull_eg = (curr["c"] > curr["o"] and prev["c"] < prev["o"] and curr["c"] >= prev["o"] and curr["o"] <= prev["c"])
+    bear_eg = (curr["c"] < curr["o"] and prev["c"] > prev["o"] and curr["o"] >= prev["c"] and curr["c"] <= prev["o"])
 
-    # 吞沒邏輯
-    bull_engulf = (curr["c"] > curr["o"] and prev["c"] < prev["o"] and 
-                   curr["c"] >= prev["o"] and curr["o"] <= prev["c"])
-    bear_engulf = (curr["c"] < curr["o"] and prev["c"] > prev["o"] and 
-                   curr["o"] >= prev["c"] and curr["c"] <= prev["o"])
-
-    long_signal = bull_trend and bull_pullback and bull_engulf
-    short_signal = bear_trend and bear_pullback and bear_engulf
+    long_signal = bull_trend and bull_pb and bull_eg
+    short_signal = bear_trend and bear_pb and bear_eg
 
     if not (long_signal or short_signal): return
 
-    # 2. 4H 趨勢過濾
+    # 4H 趨勢過濾
     df4h = fetch_klines(symbol, "4h", 60)
     if df4h is not None:
-        df4h["EMA12_4h"] = df4h["c"].ewm(span=12, adjust=False).mean()
-        df4h["EMA55_4h"] = df4h["c"].ewm(span=55, adjust=False).mean()
-        h4_last = df4h.iloc[-1]
-        if long_signal and not (h4_last["EMA12_4h"] > h4_last["EMA55_4h"]): return
-        if short_signal and not (h4_last["EMA12_4h"] < h4_last["EMA55_4h"]): return
+        e12_4h = df4h["c"].ewm(span=12, adjust=False).mean().iloc[-1]
+        e55_4h = df4h["c"].ewm(span=55, adjust=False).mean().iloc[-1]
+        if long_signal and not (e12_4h > e55_4h): return
+        if short_signal and not (e12_4h < e55_4h): return
 
-    # 避免重複
     key = f"{symbol}_{curr.name}"
     if key in sent_signals: return
     sent_signals[key] = True
 
-    # 3. 計算點位
-    entry = curr["c"]
-    sl = curr["EMA55"]
+    entry, sl = curr["c"], curr["EMA55"]
     risk = abs(entry - sl)
-    tp1 = entry + (risk * 1.0) if long_signal else entry - (risk * 1.0)
-    tp2 = entry + (risk * 1.5) if long_signal else entry - (risk * 1.5)
+    tp1, tp2 = (entry + risk, entry + risk*1.5) if long_signal else (entry - risk, entry - risk*1.5)
 
-    side = "🟢 多單 (Long)" if long_signal else "🔴 空單 (Short)"
     msg = (
-        f"🎯 Bitunix 訊號: {symbol} {side}\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"🔹 進場: {entry:.4f}\n"
-        f"🔻 止損: {sl:.4f}\n"
-        f"✅ TP1 (1:1): {tp1:.4f}\n"
-        f"🚀 TP2 (1:1.5): {tp2:.4f}\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"⏰ 時間: {curr.name.strftime('%m/%d %H:%M')}\n"
-        f"💡 已過濾 4H 趨勢"
+        f"🎯 Bitunix: {symbol} {'🟢多' if long_signal else '🔴空'}\n"
+        f"進場: {entry:.4f} | 止損: {sl:.4f}\n"
+        f"TP1: {tp1:.4f} | TP2: {tp2:.4f}"
     )
     send_telegram_message(msg)
 
-# ==================== 排程與運行 ====================
+# ==================== 任務調度 ====================
 def scan_all():
-    symbols = fetch_bitunix_symbols()
-    for s in symbols:
-        try:
+    try:
+        r = requests.get("https://api.bitunix.com/api/v1/futures/market/tickers", timeout=10)
+        symbols = [i["symbol"] for i in r.json()["data"] if i["symbol"].endswith("USDT")]
+        for s in symbols:
             check_signal(s)
-            time.sleep(0.2) # Bitunix API 限流較嚴，稍微加長等待
-        except:
-            continue
+            time.sleep(0.3) # 增加延遲避免 API 被鎖
+    except:
+        pass
 
 scheduler = BackgroundScheduler(timezone=tz)
 scheduler.add_job(scan_all, "cron", minute="2,32")
@@ -147,9 +103,10 @@ scheduler.start()
 
 @app.route("/")
 def home():
-    return "Bitunix EMA Bot is Running"
+    return "Bot Running"
 
 if __name__ == "__main__":
+    # 這裡只負責啟動 Flask，掃描交給背景 Scheduler
     port = int(os.environ.get("PORT", 5000))
-    send_telegram_message("🤖 Bitunix 機器人部署成功\n(對齊 TV v6 標籤 + 4H 過濾)")
+    send_telegram_message("🤖 Bitunix 機器人重新部署成功")
     app.run(host="0.0.0.0", port=port)
