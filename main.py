@@ -12,7 +12,7 @@ import threading
 app = Flask(__name__)
 tz = ZoneInfo("Asia/Taipei")
 
-# ==================== 配置 (請妥善保管 TOKEN) ====================
+# ==================== 配置 ====================
 TELEGRAM_BOT_TOKEN = "8464878708:AAE4PmcsAa5Xk1g8w0eZb4o67wLPbNA885Q"
 TELEGRAM_CHAT_ID = "1634751416"
 
@@ -58,7 +58,7 @@ def calculate_adx(df, period=14):
     df['adx'] = df['dx'].rolling(window=period).mean()
     return df
 
-# ==================== 動態榜單更新 (擴展至 10 名) ====================
+# ==================== 動態榜單更新 ====================
 def update_monitoring_list():
     global monitoring_list, last_update_day
     try:
@@ -72,20 +72,20 @@ def update_monitoring_list():
                 tickers.append({"id": t["instId"], "chg": chg})
         
         sorted_t = sorted(tickers, key=lambda x: x["chg"], reverse=True)
-        top_gainers = [x["id"] for x in sorted_t[:10]] # 漲幅前10
-        top_losers = [x["id"] for x in sorted_t[-10:]] # 跌幅前10
+        top_gainers = [x["id"] for x in sorted_t[:10]]
+        top_losers = [x["id"] for x in sorted_t[-10:]]
         
         monitoring_list = list(dict.fromkeys(top_gainers + top_losers))
         last_update_day = datetime.now(tz).strftime("%Y-%m-%d")
         
-        msg = f"🔥 監控清單刷新 (Top 10)\n📈 領漲: {', '.join([s.split('-')[0] for s in top_gainers[:5]])}...\n📉 領跌: {', '.join([s.split('-')[0] for s in top_losers[:5]])}..."
+        msg = f"🔥 監控清單刷新 (回調模式)\n📈 領漲: {', '.join([s.split('-')[0] for s in top_gainers[:5]])}...\n📉 領跌: {', '.join([s.split('-')[0] for s in top_losers[:5]])}..."
         send_telegram_message(msg)
     except Exception as e:
         print(f"Update Error: {e}")
 
-# ==================== 方案 A 核心策略 (大趨勢 + 小爆發) ====================
+# ==================== 核心邏輯修改：回調模式 ====================
 def check_signal(instId):
-    # --- 第一階段：4小時 (4H) 大週期過濾 (方案A：定方向) ---
+    # 1. 4H 大週期過濾
     df4h = fetch_klines(instId, "4H", 100)
     if df4h is None or len(df4h) < 60: return
 
@@ -94,13 +94,12 @@ def check_signal(instId):
     df4h["E55"] = df4h["c"].ewm(span=55, adjust=False).mean()
     curr4h = df4h.iloc[-1]
 
-    # 4H 方向過濾
     h4_long_trend = curr4h["c"] > curr4h["E55"] and curr4h["E12"] > curr4h["E30"]
     h4_short_trend = curr4h["c"] < curr4h["E55"] and curr4h["E12"] < curr4h["E30"]
 
     if not (h4_long_trend or h4_short_trend): return
 
-    # --- 第二階段：30分鐘 (30M) 進場判定 (排列+吞沒+爆量) ---
+    # 2. 30M 進場判定
     df30 = fetch_klines(instId, "30m", 150)
     if df30 is None or len(df30) < 70: return
 
@@ -109,65 +108,66 @@ def check_signal(instId):
     df30["E30"] = df30["c"].ewm(span=30, adjust=False).mean()
     df30["E55"] = df30["c"].ewm(span=55, adjust=False).mean()
     df30["MA20_Vol"] = df30["vol"].rolling(window=20).mean()
-    df30['atr'] = df30['tr'].rolling(14).mean()
     
-    curr30 = df30.iloc[-2] # 已收盤的 K 線
+    curr30 = df30.iloc[-2] # 已收盤 K 線
     prev30 = df30.iloc[-3]
     symbol = instId.replace("-USDT-SWAP", "")
 
-    # 30M 判定邏輯
-    # 1. 均線排列符合方向
+    # --- 邏輯 A: 均線多空排列 ---
     m30_ema_ok = (curr30["E12"] > curr30["E30"] > curr30["E55"]) if h4_long_trend else (curr30["E12"] < curr30["E30"] < curr30["E55"])
-    # 2. 吞沒形態 (嚴格實體吞沒)
-    m30_bull_eg = (curr30["c"] > curr30["o"] and prev30["c"] < prev30["o"] and curr30["c"] >= prev30["o"] and curr30["o"] <= prev30["c"])
-    m30_bear_eg = (curr30["c"] < curr30["o"] and prev30["c"] > prev30["o"] and curr30["o"] >= prev30["c"] and curr30["c"] <= prev30["o"])
-    # 3. 爆量 (成交量 > MA20)
+    
+    # --- 邏輯 B: 回踩 EMA 30 (當前最低/最高觸及 30 與 55 之間) ---
+    pullback_ok = (curr30["l"] <= curr30["E30"] and curr30["l"] >= curr30["E55"]) if h4_long_trend else \
+                  (curr30["h"] >= curr30["E30"] and curr30["h"] <= curr30["E55"])
+
+    # --- 邏輯 C: 爆量吞沒 (成交量需 > MA20) ---
+    m30_bull_eg = (curr30["c"] > curr30["o"] and prev30["c"] < prev30["o"] and curr30["c"] > prev30["o"])
+    m30_bear_eg = (curr30["c"] < curr30["o"] and prev30["c"] > prev30["o"] and curr30["c"] < prev30["o"])
     m30_vol_ok = curr30["vol"] > curr30["MA20_Vol"]
 
-    # 最終結合
-    long_signal = h4_long_trend and m30_ema_ok and m30_bull_eg and m30_vol_ok and curr30['adx'] > 20
-    short_signal = h4_short_trend and m30_ema_ok and m30_bear_eg and m30_vol_ok and curr30['adx'] > 20
+    # 最終訊號
+    long_signal = h4_long_trend and m30_ema_ok and pullback_ok and m30_bull_eg and m30_vol_ok and curr30['adx'] > 20
+    short_signal = h4_short_trend and m30_ema_ok and pullback_ok and m30_bear_eg and m30_vol_ok and curr30['adx'] > 20
 
     if not (long_signal or short_signal): return
 
-    # 防止重複發送
     key = f"{symbol}_{curr30.name}"
     if key in sent_signals: return
     sent_signals[key] = True
 
-    # 點位計算
+    # --- 邏輯 D: 止損點固定為 EMA 55 ---
     entry = curr30["c"]
-    atr_val = curr30['atr'] * 1.5
+    sl = curr30["E55"]
+    
     if long_signal:
-        sl = min(curr30["E55"], entry - atr_val)
-        tp1, tp2 = entry + (entry - sl), entry + (entry - sl) * 1.5
-        side = "🟢 強力多單 (V6 方案A)"
+        risk = entry - sl
+        tp1, tp2 = entry + risk, entry + risk * 1.5
+        side = "🟢 回調做多 (EMA30 回踩)"
     else:
-        sl = max(curr30["E55"], entry + atr_val)
-        tp1, tp2 = entry - (sl - entry), entry - (sl - entry) * 1.5
-        side = "🔴 強力空單 (V6 方案A)"
+        risk = sl - entry
+        tp1, tp2 = entry - risk, entry - risk * 1.5
+        side = "🔴 回調做空 (EMA30 回踩)"
 
-    # --- Telegram 通知 ---
-    msg = (f"🎯 V6 Pro+ 方案A: {symbol} {side}\n"
+    # Telegram 通知
+    msg = (f"🎯 V6 Pullback: {symbol} {side}\n"
            f"━━━━━━━━━━━━━━\n"
            f"【訊號確認】\n"
-           f"• 4H 趨勢方向: ✅\n"
-           f"• 30M 均線排列: ✅\n"
-           f"• 30M 爆量吞沒: ✅\n"
+           f"• 回踩 EMA30: ✅\n"
+           f"• 爆量吞沒: ✅ (Vol > MA20)\n"
+           f"• ADX 強度: {curr30['adx']:.1f}\n"
            f"━━━━━━━━━━━━━━\n"
-           f"進場價: {entry:.4f}\n"
-           f"止損 (SL): {sl:.4f}\n"
+           f"進場點: {entry:.4f}\n"
+           f"止損 (EMA55): {sl:.4f}\n"
            f"獲利 (TP1): {tp1:.4f}\n"
            f"獲利 (TP2): {tp2:.4f}\n"
-           f"📊 ADX強度: {curr30['adx']:.1f}\n"
            f"⏰ 時間: {curr30.name.strftime('%m/%d %H:%M')}")
     send_telegram_message(msg)
 
-# ==================== 排程系統 ====================
+# ==================== 排程系統保持不變 ====================
 def scan_dynamic():
     if not monitoring_list or datetime.now(tz).strftime("%Y-%m-%d") != last_update_day:
         update_monitoring_list()
-    print(f"[{datetime.now(tz)}] 正在掃描 V6 方案A 信號...")
+    print(f"[{datetime.now(tz)}] 正在掃描 V6 Pullback 信號...")
     for s in monitoring_list:
         check_signal(s)
         time.sleep(0.3)
@@ -175,12 +175,9 @@ def scan_dynamic():
 scheduler = BackgroundScheduler(timezone=tz)
 def init_scheduler():
     if not scheduler.running:
-        # 每 30 分鐘的第 2 分鐘執行
-        scheduler.add_job(scan_dynamic, "cron", minute="2,32", id="v6_resonate_scan")
-        # 每日凌晨更新榜單
+        scheduler.add_job(scan_dynamic, "cron", minute="2,32", id="v6_pullback_scan")
         scheduler.add_job(update_monitoring_list, "cron", hour=0, minute=1)
-        # Ping: 每 2 小時報平安
-        scheduler.add_job(lambda: send_telegram_message("💓 V6 共振系統運行中..."), "interval", minutes=120)
+        scheduler.add_job(lambda: send_telegram_message("💓 V6 回調系統運行中..."), "interval", minutes=120)
         scheduler.start()
         update_monitoring_list()
 
@@ -190,8 +187,8 @@ threading.Thread(target=init_scheduler, daemon=True).start()
 def home(): 
     return {
         "status": "Active",
+        "strategy": "V6 Pullback (SL=EMA55)",
         "monitoring": [s.split('-')[0] for s in monitoring_list],
-        "last_update": last_update_day,
         "server_time": datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
     }
 
